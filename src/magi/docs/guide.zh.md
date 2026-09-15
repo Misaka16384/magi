@@ -12,9 +12,8 @@
 
 ```powershell
 pipx upgrade --install magi-research # 1. 装或升级（幂等，重复跑没副作用）
-mkdir my-topic ; cd my-topic ; magi init   # 2. 建一个项目
-magi install                         # 3. 装进你的 agent CLI（技能 + 协议 + 收工闸门）
-magi ingest auto                     # 把 PDF 丢进 inbox/ 之后
+mkdir my-topic ; cd my-topic ; magi init   # 2. 建一个项目，并装进本机找得到的每个 agent CLI
+magi ingest auto                     # 3. 把 PDF 丢进 inbox/ 之后
 ```
 
 一个项目一个目录，没有更上面的一层。**跨项目检索走用户级注册表**（`magi kb list`），
@@ -40,13 +39,16 @@ agent 的上下文是一次性的，**状态永远在磁盘上**。所以任何�
 
 ### 三条起步路线
 
-**① 全新用户**——按第 2 章装好，然后两条命令：
+**① 全新用户**——按第 2 章装好，然后一条命令：
 
 ```powershell
 mkdir quantum-toys ; cd quantum-toys
-magi init --name "Quantum Toys" --scope "玩具模型中的量子现象"
-magi install                 # 技能 + AGENTS.md 协议块 + 会话钩子
+magi init --title "Quantum Toys" --scope "玩具模型中的量子现象"
 ```
+
+`magi init` 搭好项目之后，会把它装进本机找得到的每个 agent CLI——技能、AGENTS.md
+协议块、会话钩子（`--no-install` 跳过这一步，之后 `magi install` 再补）。在终端里
+不带 `--title`、`--scope` 运行时它会逐个问；以后随时 `magi config set title|scope` 改。
 
 之后只要一个词。裸 `magi` 就是 `magi next`：它从这个项目自己的 note 里
 派生出该做什么并提议出来——包括 `magi sync --fix` 和 `magi pm init`，在它们
@@ -60,7 +62,7 @@ No propositions yet — nothing here is being tested yet.
 
 **② Wikify 老用户**——数据不用动，直接看第 3 章，三条命令迁移。
 
-**③ 只想先试试**——随便找个空目录 `magi init` 就能用。`magi init` 会把它注册进用户级注册表，所以以后在别的项目里 `magi search` 也能搜到它。
+**③ 只想先试试**——随便哪个目录 `magi init` 都能用——它只新建文件，不覆盖。`magi init` 会把它注册进用户级注册表，所以以后在别的项目里 `magi search` 也能搜到它。
 
 ### 这份手册怎么读 {#howto-read}
 
@@ -502,7 +504,7 @@ cd <你的项目> && magi install
 
 ```powershell
 magi adopt survey .                     # 只读盘点，什么都不动
-magi init --name "..." --scope "..."    # 就地搭壳：只新建，不覆盖已有文件
+magi init --title "..." --scope "..."   # 就地搭壳：只新建，不覆盖已有文件
 magi adopt apply plan.json --dry-run    # 看它打算搬什么、改哪些引用
 magi adopt apply plan.json
 ```
@@ -526,6 +528,10 @@ MAGI 项目？）、`descended_into`（钻过的包装目录，从外到里；�
 {"moves": [{"from": "gate0", "to": "drafts/gate0"},
            {"from": "notes", "to": "drafts/notes"}]}
 ```
+
+必须留在原处的材料——比如在另一个仓库里被跟踪着的笔记——用复制代替搬动：`from` 写它的
+绝对路径，跑 `magi adopt apply plan.json --copy`。原件一个字节都不碰，复制过来的文件之间的
+引用照样改对，`magi adopt undo` 会把这些副本删掉。
 
 ### 引用会被改对 {#adopt-links}
 
@@ -554,7 +560,7 @@ magi adopt undo output/adopt/2026-09-02-021152.json
 字和文件一起放回去。对着两个真实仓库验过：撤销后与原始仓库逐字节相同。
 
 > [!NOTE]
-> `apply` 从不删除、从不覆盖、从不把东西搬出项目目录，也从不动 MAGI 自己的脚手架。
+> `apply` 从不删除、从不覆盖、从不把东西搬出项目目录（`--copy` 只往里带，不往外拿），也从不动 MAGI 自己的脚手架。
 > 计划里只要有一条不合法，一条都不执行——搬了一半的文件夹比没搬的更难收拾。
 
 对应的 skill 叫 `adopt`：那是给 agent 的操作手册，人只负责看计划、确认，不用自己
@@ -563,12 +569,24 @@ magi adopt undo output/adopt/2026-09-02-021152.json
 
 ## 建立项目 {#workspace}
 
-两条命令就能建好：
+一条命令就能建好：
 
 ```powershell
-magi init               # 在这个项目自己的目录里
-magi install            # 装进你的 agent CLI：技能 + 协议块 + 收工闸门
+magi init               # 在这个项目自己的目录里：骨架、标题与范围，以及本机找得到的每个 agent CLI
 ```
+
+标题和范围在终端里会问你；不在终端里（比如 agent 替你跑），标题取目录名，范围先放一句占位，
+`magi init` 结尾会点名。两者随时可改，每个 agent 开场读的协议块会跟着重新渲染：
+
+```powershell
+magi config set title "Mobility fusion"
+magi config set scope "fracton 可动性的融合规则"
+magi config get                              # 两者都列出来，外加设置文件在哪
+magi config set research.coaching strict     # config.yaml 里的任意键，写成 section.key
+```
+
+在已经有东西的目录里，`magi init` 会列出它找到了什么，一样都不碰；下一步是 `magi adopt survey .`。
+已有的 `.gitignore` 只会被追加 MAGI 的几行，不会被替换。
 
 一个项目一个目录，之上没有别的层。下面是生成了什么、多个项目怎么一起用、以及 MAGI 怎么判断「当前项目」。
 
@@ -579,12 +597,13 @@ magi install            # 装进你的 agent CLI：技能 + 协议块 + 收工�
 
 ```powershell
 mkdir my-topic ; cd my-topic
-magi init --name "显示名" --scope "一句话说清这个项目收什么、不收什么"
-magi install
+magi init --title "显示名" --scope "一句话说清这个项目收什么、不收什么"
 magi pm init           # 可选：机械任务的任务库（会 git-init 本目录）
 ```
 
-`magi search` 默认只搜你现在这个项目，`--scope all` 才去读别的；`magi kb list` 列出这台机器上都有哪些。v1 的 hub（父目录 +
+`magi search` 默认只搜你现在这个项目，`--scope all` 才去读别的；`magi kb list` 列出这台机器上都有哪些；`magi kb prune` 删掉目录已经不在了的登记，`magi kb prune --temp`
+连住在系统临时目录里的项目（测试和 agent 临时建的项目）一起删——只删登记，不碰文件。项目如果是某个更大的
+git 仓库里的一个子目录，`magi sync` 不会建议 `pm init`，`magi pm init` 在那里也要 `--yes`：bd 会往那个仓库里提交。v1 的 hub（父目录 +
 `wikis.json` + `topics/`）退场了：它存在的理由是那份注册表，而注册表现在是每台机器一份，
 项目住在哪里都能被找到。
 
@@ -602,7 +621,7 @@ my-topic/
 ├─ decisions.md            只有人做的决定；agent 誊写，别的什么都不写进来
 ├─ inbox/                  待处理投喂区（PDF 丢这里）· notes.md 是你的随手堆放区
 ├─ raw/                    摄入后的原始文献 Markdown
-│   articles/ papers/ repos/ notes/ data/
+│   articles/ papers/ repos/ data/
 ├─ wiki/                   编译产物
 │   concepts/  概念卡    references/ 文献卡    topics/  专题综述
 ├─ threads/                命题 / 问题 / 研究线（论坛式跟帖，`magi thread`）
@@ -728,6 +747,7 @@ magi ingest url 2608.16520 --expect "fracton"   # 凭记忆敲的号：先取题
 magi ingest batch-run                                 # 抓取 + 转换，无人值守
 magi ingest review                                    # 看看转出来什么样
 magi ingest review --item <ID> --decision approve      # 逐条过
+magi ingest review --approve-all                      # 或者看过列表后，一次通过所有转换成功的
 magi ingest review --commit                           # 到这一步才真的进 raw/
 ```
 
@@ -738,7 +758,10 @@ magi ingest review --commit                           # 到这一步才真的进
 
 **它先试最好的源。** arXiv 自己为绝大多数论文发布 LaTeXML 渲染的 HTML，
 里面**每个公式都原样带着作者写的 LaTeX**——不涉及任何识别。这条排在源码 tar 包之前，
-tar 包又排在所有 PDF 路线之前。
+tar 包又排在所有 PDF 路线之前。HTML 这条路线还会读论文的 LaTeX 源码——不是拿来转换，只为作者
+自己定义的宏——并修复 LaTeXML 与 pandoc 对公式**版式**造成的损伤（见[公式](#compile-math)）。
+修不了的，review 里记成 `math-layout-left`；提交后仍会让 `magi math check` 报错的每个公式，记成
+`math-damage`——都在提交之前。
 
 到了 PDF 这一层，同样的道理再往下走一格。在花掉一个 MinerU token 或一分钟 GPU 之前，
 MAGI 先问这份文档是不是真需要：**没有数学的原生电子版 PDF，可以直接读它自己的文本层**
@@ -782,7 +805,7 @@ magi ingest auto --dry-run        # 先看它打算怎么走
 
 需要指定页码、强制某条路线、或者对付难搞的扫描件时，再手动挑下面的命令。
 
-**能拿到 arXiv 源码包就优先走 `tex`**——它保留 `.bib`/`.bbl` 到 markdown 旁边，还会把 arXiv ID 写进 frontmatter 供雷达和 `magi bib` 使用。
+**arXiv 论文不用你选：排队时先走 HTML 渲染，没有渲染才落到源码包。** 渲染里每个公式的 TeX 都原样带着，也避开了源码路线实测过的几种失败——从源码包里挑错主文件、`\input` 拼接、pandoc 被纯 TeX 原语卡死。作者的宏两条路线都会从 e-print 里取：公式里调用到的就地展开，展开不了的留在论文旁边的 `<论文>.macros.tex` 里，供 `magi math check` 使用。想让 `.bib`/`.bbl` 待在 markdown 旁边，就自己跑 `magi ingest tex`——只有那条路线保留它们。
 
 另外两条辅助路线：`magi ingest assemble` 把 agent 自己逐页转录出来的 `page_1.md, page_2.md…` 按页码拼成一篇；`magi ingest crop` 把 PDF 的某一块裁成 PNG，用来肉眼核对公式。
 
@@ -1004,18 +1027,32 @@ magi wiki placeholders wiki/concepts/x.md # 找出没写完的占位段落
 ### 公式 {#compile-math}
 
 ```powershell
-magi math format                    # 机械修复：$$ 配对、\tag 位置、eqnarray→align、OCR 粘连
+magi math repair --dry-run          # arXiv HTML 来的论文：LaTeXML 与 pandoc 对公式版式做了什么
+magi math repair                    # ……修掉：公式表格、跑进公式里的编号、图的代码、丢了反斜杠的换行
+magi math format --dry-run          # 机械修复以 diff 形式列出，什么都不写
+magi math format                    # $$ 配对、\tag 位置、eqnarray→align、OCR 粘连
 magi math check                     # 只报错不改：整个项目扫一遍，按文件列出坏在哪
 magi math check --json              # 同上，但输出一张可逐条处理的工单
+magi math undo                      # 撤回上一次 repair 或 format 改动的内容
 ```
 
-**两条命令默认都作用于整个项目**（和 `magi lint` 一样），也可以像 `magi math check raw/papers/x.md`
-这样只点一个文件或目录。范围限定在 `wiki/ raw/ drafts/`——`format` 是就地改写且没有 dry-run，
-`scratch/` 里放的正是概念卡备份，不能被它碰。
+**这些命令默认都作用于整个项目**（和 `magi lint` 一样），也可以像 `magi math check raw/papers/x.md`
+这样只点一个文件或目录。范围限定在 `wiki/ raw/ drafts/`；`repair` 只读 `raw/`，而且只碰带 LaTeXML
+标记的论文。每一次真正写入的运行都会在 `output/tidy/` 留一份记录——每处改动连同它替换掉的原文——
+`magi math undo` 据此放回：文件之后没动过就按位置放回，别处动过就按改动后的原文去找，那段原文本身
+被改过就不碰。
 
-顺序永远是**先 format 再 check**：能机械修的先修掉，剩下的才值得人去读。
+顺序永远是 **repair → format → check**：能机械修的先修掉，剩下的才值得人去读。
 
-`--fast` 跳过逐文件的 pdflatex 深检（大项目能省几分钟），`--wiki-only` 只看编译好的卡片。
+`--fast` 跳过逐文件的 pdflatex 深检，`--wiki-only` 只看编译好的卡片，`--limit N` 只列前 N 条，而
+`--json` 里的 `total` 仍然数全部。pdflatex 深检给每个文件设了期限——三十秒，外加每个公式百分之一秒；
+实测 2 000 个公式只要 0.9 秒——超时的文件会被二分，直到找出让 pdflatex 死循环的那一个公式并单独报出，
+文件里其余的照常检查。已知会死循环、或者根本不是数学的公式（`\\` 后面跟 `\vskip`、LaTeXML 的绘图
+代码、图、跑进公式里的编号）直接报出，从不送进编译。
+
+校验器的导言区在 TeX 发行版里有这些宏包时会加载：amsmath、physics、bm、mathtools、mathrsfs、dsfont、
+slashed、cancel、xcolor、bbm、yfonts。整个项目还要用到的，写进 `config.yaml` 的 `math.preamble`；某一篇
+论文自己定义的，写进它旁边的 `<论文>.macros.tex`——arXiv HTML 路线会自动写这个文件。
 
 `--json` 每条一个公式，带 `id`（`路径:行`，可勾掉）、行范围、原始 TeX、以及 `confidence`：
 
@@ -1033,7 +1070,10 @@ magi math check --json              # 同上，但输出一张可逐条处理的
 
 > [!NOTE]
 > `Undefined control sequence` 多半是**误报**——校验器不认识某个宏包的宏而已。抽一个对照原 PDF 确认后，其余同类可以忽略。真正要改的是 `Double subscript`、`Missing }`、`Unexpected end of stream` 这类结构错误：用 `magi ingest crop <pdf> --text "<附近文字>" --out scratch/crop.png` 把原文裁出来对着改。
-> `[WARNING] Orphaned $$ remains on line L` 是 format 自己也判断不了的边界，必须手工配对。
+> `[WARNING] Orphaned $$ remains on line L` 说明这个文件里的 `$$` 配不上对。点名的那一行是第一个会跨过空行的公式块——也就是闭合符丢了的地方——就在那里手工配对。
+
+> [!NOTE]
+> 公式里的 `\text{[omitted: tikz picture: fdot]}` 是原来放图的地方。LaTeXML 把图的代码写进了公式的 TeX，而图没法待在公式里，所以 `magi math repair` 留下一个形状固定的标记——编译论文的 agent 能把它和作者的原话分开。
 
 ---
 
@@ -1163,7 +1203,9 @@ magi index --quiet        # 不打进度行（末尾汇总照常输出）
 > ```
 > 结尾若是 `· BM25-only (Ollama unavailable)`，说明向量那一半没建起来。
 
-每次送 16 块给 Ollama。要改就在 `config.yaml` 里设 `ollama.embed_batch`——调大更快，但 Ollama 那边内存占用也更高；嵌入服务跑到一半被杀掉，代价远大于省下的那点时间。
+每次送 16 块给 Ollama。要改就在 `config.yaml` 里设 `ollama.embed_batch`——调大更快，但 Ollama 那边内存占用也更高；嵌入服务跑到一半被杀掉，代价远大于省下的那点时间。跑过一段之后，进度行会带上估计（`file 12/40, about 9 min left`）。
+
+Ollama 在最后一次请求之后会把模型在内存里留五分钟——`qwen3-embedding:0.6b` 大约是 2 GB 内存外加差不多同样多的显存。MAGI 在用到嵌入模型的那条命令结束时卸载它：退出时发一次请求，绝不每批一次，所以整个运行期间模型都在。`config.yaml` 里的 `ollama.keep_alive` 可以改：`"30m"` 这样的时长让它在命令之间保持热着，`-1` 一直留着。长期运行的 `magi ui` 在服务停下时卸载；两次搜索之间照 Ollama 自己的五分钟。
 
 `magi index` 还会把当前项目**自动注册**进全局项目表（`~/.config/magi/registry.json`），这样别的项目也能搜到它。
 
@@ -1225,7 +1267,9 @@ magi thread new p-dual --kind proposition --title "对偶是 Z2 规范理论" `
 magi thread new p-idx --kind proposition --title "扭曲指标" --purpose "从 L=128 那一跑来的" `
   --claim "h = 1 时扭曲指标等于 3。" --derivation drafts/index.md --evidence tools/index.m2
 magi thread post p-idx --evidence tools/index_check.py --text "第二次独立计数"
+magi thread post q-count --evidence tools/count.py --text "回答它的那次枚举"   # 问题也能挂证据
 magi thread claim p-idx --text "h = 1 与 2 时扭曲指标等于 3。"   # 重述，记成一条跟帖
+magi thread derivation p-idx drafts/index-v2.md --replace   # 论证搬了家：同样记成一条跟帖
 ```
 
 **标题、陈述、证据。** 标题是名字；`--claim` 是复核者要判的那句话，带量词，复核说写宽了就用

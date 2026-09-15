@@ -21,13 +21,13 @@ citation the human read out.
    `magi ingest url "<id>" --expect "<title fragment>"`; then `magi ingest batch-run`.
 3. `magi ingest review` lists what is waiting. Show its findings to the human
    before committing — surface `identity-mismatch`, `figure-count-mismatch`
-   and `image-path-not-portable` every time: they mean the file is not what
-   its name says.
-4. `magi ingest review --item <id> --decision approve` per row, then
-   `magi ingest review --commit`.
-5. After a batch: `magi math check --json`. Ingestion's signature failure is a
-   `$$` that lost its pair and swallowed the paragraph after it — valid LaTeX,
-   so nothing catches it. Work that list with the `tidy` skill.
+   and `image-path-not-portable` every time: the file is not what its name says.
+   `math-damage` counts formulas that will fail `magi math check`: say the number.
+4. Once the human has seen the list: `magi ingest review --approve-all` (or
+   `--item <id> --decision approve` per row), then `magi ingest review --commit`.
+5. After a batch: `magi math check --json` — a `$$` that lost its pair swallows
+   the paragraph after it and is still valid LaTeX. Work the list with `tidy`;
+   papers from an older arXiv-HTML ingest first get `magi math repair --dry-run`.
 
 ## Rules
 - **Never** transcribe pages through vision because a converter failed: it costs

@@ -77,7 +77,6 @@ def test_init_points_at_the_command_that_does_the_whole_job():
 
     src = (Path(__file__).resolve().parents[1]
            / "src" / "magi" / "init_workspace.py").read_text(encoding="utf-8")
-    line = [ln for ln in src.splitlines() if "Next: cd into it" in ln][0]
-
-    assert "'magi install'" in line
-    assert "skills install" not in line
+    # Init no longer sends anyone off to run it: it runs the whole job itself.
+    assert "install_cmd.main(" in src
+    assert "skills_cmd" not in src

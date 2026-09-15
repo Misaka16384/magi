@@ -175,16 +175,16 @@ Run `magi next` first — it reads the notes and says what to do, and never acts
 `magi --help` is the command surface; `magi guide --search "<error>"` is the manual.
 
 ## Where things live
-- `raw/` — sources. Never edit by hand: re-ingest instead. The pipeline does
-  repair them (`magi math format` fixes OCR math artifacts here) — that is
-  tooling, not you.
+- `raw/` — sources, as converted: re-ingest, never rewrite — except a formula the
+  conversion broke: `magi math repair`/`format` (`magi math undo` reverts a run),
+  then the `tidy` skill. `[omitted: …]` in a formula is a figure it removed.
 - `wiki/references/` — compiled from `raw/`. Rebuild, never hand-edit.
 - `wiki/concepts/`, `wiki/topics/` — shared knowledge. Edit freely.
 - `drafts/` — the working out. `threads/` — propositions, questions, lines.
 - `inbox/notes.md` — anything, unsorted. `decisions.md` — what a person decided.
 - `output/` — derived and rebuildable, **except** `ingest/ radar/ reflect/
-  adopt/ llm-ledger.jsonl`: those record what a person decided, what it cost,
-  and how to undo a move. Nothing rebuilds those.
+  adopt/ tidy/ llm-ledger.jsonl`: those record what a person decided, what it
+  cost, and how to undo a change. Nothing rebuilds those.
 
 ## Invariants
 1. Evidence points at `raw/`, never at a card compiled from it.

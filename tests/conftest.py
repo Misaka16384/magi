@@ -34,6 +34,18 @@ from pathlib import Path
 
 import pytest
 
+# `magi init` installs into every agent CLI on the machine unless told not to.
+# A scaffolding test must not depend on which CLIs the machine running it has
+# — on a developer's box that adds `.claude/` and `.codex/` to a workspace a
+# layout test is about to count, and on CI it adds nothing. Set before any
+# fixture spawns `magi`, so subprocesses inherit it; the tests of init's own
+# install step clear it for themselves.
+os.environ["MAGI_INIT_NO_INSTALL"] = "1"
+# An embedding call that succeeds arms an unload of the model at interpreter
+# exit. In the suite that unload would reach the developer's real Ollama and
+# take the model away from whatever else is using it.
+os.environ["MAGI_NO_OLLAMA_RELEASE"] = "1"
+
 
 @pytest.fixture(scope="session", autouse=True)
 def isolate_config_home_for_the_session(tmp_path_factory):

@@ -32,6 +32,8 @@ _COMMANDS: dict[tuple[str, ...], tuple[str, list[str], str]] = {
     ("skills", "install"): ("magi.skills_cmd", ["install"], "Install the skills into your agent CLI(s) (--scope global|project)"),
     ("skills", "uninstall"): ("magi.skills_cmd", ["uninstall"], "Remove magi's skills from an agent CLI"),
     ("setup",): ("magi.setup_cmd", [], "Provision the environment (beads, models, plugin) + doctor"),
+    ("config", "get"): ("magi.config_cmd", ["get"], "Show the project's title and scope, or one config.yaml key"),
+    ("config", "set"): ("magi.config_cmd", ["set"], "Set the title, the scope, or a config.yaml key (section.key)"),
     ("update",): ("magi.update", [], "Check for a newer release and install it"),
     ("migrate",): ("magi.migrate", [], "Upgrade a pre-magi (Wikify) directory — one project, or a hub of them"),
     ("adopt", "survey"): ("magi.adopt", ["survey"], "Inventory a folder of existing research material"),
@@ -80,6 +82,8 @@ _COMMANDS: dict[tuple[str, ...], tuple[str, list[str], str]] = {
     ("hook",): ("magi.hook_cmd", [], "Called by an agent CLI's hooks; not for typing by hand"),
     ("reflect",): ("magi.reflect.cmd", [], "Read the sessions where something happened, and write down what keeps happening"),
     ("feed",): ("magi.state", ["feed"], "Every post, newest first"),
+    ("thread", "derivation"): ("magi.kb.thread_cmd", ["derivation"],
+                               "Point a proposition at where its argument lives, as a recorded change"),
     ("thread", "new"): ("magi.kb.thread_cmd", ["new"],
                         "Open a proposition, question or research line"),
     ("thread", "post"): ("magi.kb.thread_cmd", ["post"],
@@ -102,6 +106,8 @@ _COMMANDS: dict[tuple[str, ...], tuple[str, list[str], str]] = {
     ("map",): ("magi.kb.llmwiki", ["map"], "Structural map of headings and math blocks"),
     ("math", "format"): ("magi.kb.format_math", [], "Auto-fix LaTeX delimiter/escaping issues project-wide"),
     ("math", "check"): ("magi.kb.validate_math_latex", [], "Find broken formulas; --json for a worklist"),
+    ("math", "repair"): ("magi.ingest.latexml_math", [], "Undo arXiv-HTML conversion damage to formulas (--dry-run first)"),
+    ("math", "undo"): ("magi.kb.tidy_log", [], "Put back what a math format/repair run changed"),
     ("validate",): ("magi.kb.validate_output", [], "Schema-validate generated thesis/research docs"),
     ("verify",): ("magi.kb.verify_claims", [], "Verify CLAIM/FINDING evidence blocks"),
     ("claims", "verify"): ("magi.kb.verify_claims", [], "Alias of 'magi verify' (claim/evidence check)"),
@@ -135,6 +141,7 @@ _GROUP_HELP = {
     "thread": "Propositions, questions and research lines",
     "graph": "SQLite knowledge graph",
     "math": "LaTeX math formatting and validation",
+    "config": "What a project says about itself, and its settings",
     "pm": "Work-state bridge to Beads (bd)",
     "claims": "Claim/evidence provenance",
     "radar": "Literature radar (scheduled discovery)",
@@ -210,6 +217,17 @@ def main(argv: list[str] | None = None) -> int:
     # that most need tracing are the ones that spawn other commands, and a
     # flag only some of them accept is a flag nobody remembers.
     argv = trace.consume_flag(list(argv))
+
+    # Python block-buffers output that is not a terminal, so a long command
+    # written to a file — `magi ingest review --commit > commit.log` — showed
+    # nothing for many minutes, and a hang could not be told from progress. A
+    # line at a time costs nothing anyone would notice.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if not stream.isatty():
+                stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError, OSError):
+            pass
 
     if not argv:
         # Bare `magi` is `magi next` (design-v2 §7): one entry, and the router

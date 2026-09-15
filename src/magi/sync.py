@@ -208,6 +208,18 @@ def melchior_status(topic: Path, scan: _WikiScan | None = None) -> dict:
     }
 
 
+def _has_documents(topic: Path) -> bool:
+    """Is there anything under the project's document trees yet?"""
+    for tree in ("raw", "wiki", "drafts", "threads"):
+        base = topic / tree
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.md"):
+            if path.name != "_index.md" and ".backup" not in path.parts:
+                return True
+    return False
+
+
 def casper_status(topic: Path, scan: _WikiScan | None = None) -> dict:
     idx = topic / "output" / "index.db"
     if not idx.is_file():
@@ -489,9 +501,18 @@ def build_report(cwd: Path | None = None) -> dict:
             # another program that git-inits and commits under the person's
             # own identity, and a one-line nudge that does not say so is how
             # somebody ends up with a commit they did not make.
-            _hint("pm-uninit",
-                  "magi pm init   # optional task tracking; hands this "
-                  "directory to bd, which git-inits and commits")
+            #
+            # Not offered at all inside a larger git repository — a project
+            # folder in somebody's documents repo. There the commit would land
+            # in that repository, and a one-line nudge toward it is how a
+            # person ends up with a commit in the wrong history. Task tracking
+            # is optional; `magi pm init` still says all of this if asked.
+            from magi.pm import enclosing_repo
+
+            if enclosing_repo(topic) is None:
+                _hint("pm-uninit",
+                      "magi pm init   # optional task tracking; hands this "
+                      "directory to bd, which git-inits and commits")
         elif (b["ready"] or 0) > 0:
             _hint("bd-ready", "bd ready   # there is actionable work", ready=b["ready"])
 
@@ -500,7 +521,11 @@ def build_report(cwd: Path | None = None) -> dict:
         cores["casper"] = c
         weights["casper"] = 1.0
         if c["state"] == "missing":
-            _hint("index-missing", "magi index   # build the retrieval index")
+            # Only once there is something to index. On a project made a
+            # minute ago this was the first suggestion — before a single source
+            # was in it — for a command that builds an empty index.
+            if _has_documents(topic):
+                _hint("index-missing", "magi index   # build the retrieval index")
         elif c["state"] == "unreadable":
             _hint("index-unreadable",
                   "magi index   # output/index.db is not a database; rebuild it")
@@ -759,7 +784,8 @@ def main(argv: list[str] | None = None) -> int:
                        if m.get("claims") else "")
         print(f"|- MELCHIOR  (knowledge)  {m['concepts']} concepts · {m['references']} refs · graph {m['graph']} · backlog {m['backlog']}{claims_part}")
     else:
-        print("|- MELCHIOR  (knowledge)  no project here — run 'magi init' in an empty directory")
+        print("|- MELCHIOR  (knowledge)  no project here — 'magi init' makes one in place "
+              "(it adds files, never replaces them)")
     b = report["cores"]["balthasar"]
     if b.get("state") == "disabled":
         print("|- BALTHASAR (intent)     disabled (task tracking off — "

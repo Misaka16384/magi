@@ -5,9 +5,12 @@ import os
 import re
 import sys
 import shutil
-import subprocess
 import tempfile
+import time
 from pathlib import Path
+from typing import NamedTuple
+
+from magi.core.proc import run_with_deadline
 
 # Try to import pylatexenc as fallback
 try:
@@ -15,6 +18,60 @@ try:
     HAS_PYLATEXENC = True
 except ImportError:
     HAS_PYLATEXENC = False
+
+
+# --------------------------------------------------------------------------
+# Hazards: formulas that are not so much wrong as dangerous to compile.
+#
+# pdflatex is asked "is this well formed" and usually answers with an error.
+# A few inputs make it loop instead, and under nonstopmode a loop that raises
+# no error never stops: `magi ingest review --commit` sat for twenty minutes on
+# one (arXiv:2108.10324 eq. 22). Every pattern here came out of LaTeXML,
+# arXiv's HTML renderer, by way of pandoc, and none of it is mathematics a
+# person wrote — so it is named here, by a string match, and kept out of the
+# compile altogether. The deadline in `validate_math_pdflatex` is the net for
+# whatever this list does not know yet.
+# --------------------------------------------------------------------------
+
+_HAZARDS = (
+    (re.compile(r"\\\\\s*\\vskip"),
+     "`\\\\` followed by `\\vskip` — LaTeXML's spelling of `\\\\[<length>]`, which "
+     "sends pdflatex into an endless loop inside an array; write `\\\\[<length>]`"),
+    (re.compile(r"\\(?:pgfpicture|makeatletter)(?![A-Za-z])|\\lxSVG@|\\lx@"),
+     "LaTeXML drawing code inside a formula — a figure, not mathematics; "
+     "`magi math repair` puts a placeholder in its place"),
+    (re.compile(r"\\begin\{(?:tikzpicture|picture)\}|\\includegraphics(?![A-Za-z])"),
+     "a figure inside a formula — `magi math repair` puts a placeholder in its place"),
+    (re.compile(r"\{\.ltx_tag(?![A-Za-z])"),
+     "an equation number (`[(n)]{.ltx_tag …}`) inside the formula — after `\\\\` "
+     "TeX reads `[(n)]` as a length; it belongs after the closing `$$`"),
+    (re.compile(r"(?m)^[ \t]*\|[ \t]{3}\|"),
+     "table-cell borders inside the formula — a pandoc grid table split a "
+     "multi-line equation; `magi math repair` rebuilds it"),
+)
+
+
+def formula_hazard(math_content: str) -> str | None:
+    """Why this formula must not be handed to pdflatex, or None."""
+    for pattern, why in _HAZARDS:
+        if pattern.search(math_content):
+            return why
+    return None
+
+
+def _hazard_issue(math_content, line_num, end_line, is_block, why):
+    excerpt = " ".join(math_content.split())
+    return {
+        "md_line": line_num,
+        "md_end_line": end_line,
+        "error": why,
+        "context": excerpt[:160] + ("…" if len(excerpt) > 160 else ""),
+        "is_block": is_block,
+        # Its own detector in the worklist: a hazard is conversion damage with
+        # a mechanical repair, not a formula somebody has to read and fix.
+        "detector": "hazard",
+    }
+
 
 def validate_math_pylatexenc(content):
     issues = []
@@ -62,6 +119,12 @@ def validate_math_pylatexenc(content):
         end_index = match.end()
         line_num = line_of(start_index)
         end_line = line_of(end_index)
+        # Before any parser sees it: a hazard is reported and never becomes
+        # a "valid" block, which is what keeps it out of the pdflatex run.
+        why = formula_hazard(math_content)
+        if why:
+            issues.append(_hazard_issue(math_content, line_num, end_line, True, why))
+            continue
         if HAS_PYLATEXENC:
             try:
                 walker = LatexWalker(math_content, tolerant_parsing=False)
@@ -100,6 +163,10 @@ def validate_math_pylatexenc(content):
         end_index = match.end()
         line_num = line_of(start_index)
         end_line = line_of(end_index)
+        why = formula_hazard(math_content)
+        if why:
+            issues.append(_hazard_issue(math_content, line_num, end_line, False, why))
+            continue
         if HAS_PYLATEXENC:
             try:
                 walker = LatexWalker(math_content, tolerant_parsing=False)
@@ -154,7 +221,7 @@ def parse_latex_log(log_lines):
                         next_line = log_lines[j + 1]
                         if not next_line.startswith("!") and not next_line.startswith("l."):
                             part2 = next_line
-                    
+
                     issues.append({
                         "error": current_error,
                         "tex_line": tex_line,
@@ -183,161 +250,282 @@ def _is_a_pdflatex_font_limit(error: str) -> bool:
     return bool(_NO_PDFLATEX_FONT.search(error or ""))
 
 
-def validate_math_pdflatex(valid_blocks, valid_inlines):
-    issues = []
-    # Physics/math literature leans on more than the ams trio (\bm, \mathscr,
-    # \ket, ...). Load the common packages when the TeX distro has them and
-    # degrade to harmless fallbacks when it doesn't, so validation flags real
-    # typos instead of every missing-package macro.
-    tex_lines = [
-        r"\documentclass{article}",
-        r"\usepackage{amsmath,amssymb,amsfonts}",
-        r"\IfFileExists{bm.sty}{\usepackage{bm}}{\providecommand{\bm}[1]{\boldsymbol{#1}}}",
-        r"\IfFileExists{mathtools.sty}{\usepackage{mathtools}}{}",
-        r"\IfFileExists{mathrsfs.sty}{\usepackage{mathrsfs}}{\providecommand{\mathscr}[1]{\mathcal{#1}}}",
-        r"\IfFileExists{dsfont.sty}{\usepackage{dsfont}}{\providecommand{\mathds}[1]{\mathbb{#1}}}",
-        r"\IfFileExists{slashed.sty}{\usepackage{slashed}}{\providecommand{\slashed}[1]{#1}}",
-        r"\IfFileExists{cancel.sty}{\usepackage{cancel}}{\providecommand{\cancel}[1]{#1}}",
-        r"\IfFileExists{physics.sty}{\usepackage{physics}}{}",
-        r"\providecommand{\ket}[1]{\lvert #1\rangle}",
-        r"\providecommand{\bra}[1]{\langle #1\rvert}",
-        r"\providecommand{\braket}[1]{\langle #1\rangle}",
-        r"\providecommand{\tr}{\operatorname{tr}}",
-        r"\providecommand{\Tr}{\operatorname{Tr}}",
-        r"\begin{document}"
-    ]
-    
-    tex_to_md_map = {}
-    current_tex_line = len(tex_lines) + 1
+# Physics/math literature leans on more than the ams trio (\bm, \mathscr,
+# \ket, ...). Load the common packages when the TeX distro has them and
+# degrade to harmless fallbacks when it doesn't, so validation flags real
+# typos instead of every missing-package macro.
+PREAMBLE = [
+    r"\usepackage{amsmath,amssymb,amsfonts}",
+    r"\IfFileExists{bm.sty}{\usepackage{bm}}{\providecommand{\bm}[1]{\boldsymbol{#1}}}",
+    r"\IfFileExists{mathtools.sty}{\usepackage{mathtools}}{}",
+    r"\IfFileExists{mathrsfs.sty}{\usepackage{mathrsfs}}{\providecommand{\mathscr}[1]{\mathcal{#1}}}",
+    r"\IfFileExists{dsfont.sty}{\usepackage{dsfont}}{\providecommand{\mathds}[1]{\mathbb{#1}}}",
+    r"\IfFileExists{slashed.sty}{\usepackage{slashed}}{\providecommand{\slashed}[1]{#1}}",
+    r"\IfFileExists{cancel.sty}{\usepackage{cancel}}{\providecommand{\cancel}[1]{#1}}",
+    # Three more that real papers use inside formulas and that were reported
+    # as "Undefined control sequence" on valid source: `\color[rgb]{1,0,0}`
+    # (16 formulas in one paper), bbm's `\mathbbm{1}`, and yfonts'
+    # Schwabacher, which LaTeXML writes out as `{\swabfamily w}` (57).
+    r"\IfFileExists{xcolor.sty}{\usepackage{xcolor}}"
+    r"{\providecommand{\color}[2][]{}\providecommand{\textcolor}[3][]{#3}}",
+    r"\IfFileExists{bbm.sty}{\usepackage{bbm}}{\providecommand{\mathbbm}[1]{\mathbb{#1}}}",
+    r"\IfFileExists{yfonts.sty}{\usepackage{yfonts}}"
+    r"{\providecommand{\swabfamily}{}\providecommand{\frakfamily}{}"
+    r"\providecommand{\gothfamily}{}\providecommand{\textswab}[1]{#1}"
+    r"\providecommand{\textfrak}[1]{#1}\providecommand{\textgoth}[1]{#1}}",
+    r"\IfFileExists{physics.sty}{\usepackage{physics}}{}",
+    r"\providecommand{\ket}[1]{\lvert #1\rangle}",
+    r"\providecommand{\bra}[1]{\langle #1\rvert}",
+    r"\providecommand{\braket}[1]{\langle #1\rangle}",
+    r"\providecommand{\tr}{\operatorname{tr}}",
+    r"\providecommand{\Tr}{\operatorname{Tr}}",
+]
 
-    def add_snippet(math_content, is_block, md_line, md_end_line):
-        nonlocal current_tex_line
-        lines = math_content.split('\n')
-        
-        if is_block:
-            top_level_envs = [
-                'align', 'align*', 'gather', 'gather*', 'multline', 'multline*',
-                'equation', 'equation*', 'alignat', 'alignat*', 'flalign', 'flalign*',
-                'eqnarray', 'eqnarray*',
-            ]
-            stripped = math_content.strip()
-            is_top_level = any(stripped.startswith(rf"\begin{{{env}}}") for env in top_level_envs)
-            if not is_top_level:
-                tex_lines.append(r"\begin{equation*}")
-                current_tex_line += 1
-            
-            for idx, line in enumerate(lines):
-                if line.strip() == "":
-                    tex_lines.append("%")
-                else:
-                    tex_lines.append(line)
-                tex_to_md_map[current_tex_line] = (md_line, md_end_line, is_block)
-                current_tex_line += 1
-                
-            if not is_top_level:
-                tex_lines.append(r"\end{equation*}")
-                current_tex_line += 1
+_TOP_LEVEL_ENVS = (
+    'align', 'align*', 'gather', 'gather*', 'multline', 'multline*',
+    'equation', 'equation*', 'alignat', 'alignat*', 'flalign', 'flalign*',
+    'eqnarray', 'eqnarray*',
+)
+
+_CASCADE_INDICATORS = (
+    "missing $ inserted",
+    "display math should end with $$",
+    "bad math environment delimiter",
+    "extra }, or forgotten $",
+    "missing } inserted",
+    "allowed only in math mode",
+)
+
+#: How much of a log is worth reading. A looping run was measured writing
+#: 127 MB in six seconds; errors worth reporting are in the first megabytes.
+_LOG_READ_LIMIT = 32 * 1024 * 1024
+
+#: How long one compile may run before it is treated as a loop rather than as
+#: slow: a floor for starting TeX and loading the preamble, plus a share per
+#: formula. Measured on seventeen real arXiv papers of 120 KB to 950 KB, 265
+#: to 2 150 formulas each: every honest compile took 0.8-0.9 s. The floor is
+#: thirty times that because this machine and others like it run near their
+#: memory limit, and calling a slow compile a loop blames a correct formula.
+PDFLATEX_FLOOR = 30.0
+PDFLATEX_PER_FORMULA = 0.01
+
+#: The same for the compiles that hunt for a looping formula. Those are small
+#: and many, and the bisection is only as fast as its slowest dead end; the
+#: last step re-checks the suspect with the full floor before blaming it.
+BISECT_FLOOR = 8.0
+
+#: A file that loops on more formulas than this is not one bad formula, and
+#: the pass stops looking rather than spending minutes per file.
+MAX_LOOPS = 3
+
+
+def deadline_for(n_formulas: int, floor: float = PDFLATEX_FLOOR) -> float:
+    return floor + PDFLATEX_PER_FORMULA * n_formulas
+
+
+class _Snippet(NamedTuple):
+    tex: str
+    is_block: bool
+    md_line: object
+    md_end_line: object
+
+
+def _snippets(items, is_block):
+    out = []
+    for item in items:
+        if len(item) == 3:
+            math_content, md_line, md_end_line = item
         else:
-            tex_lines.append(r"$")
-            current_tex_line += 1
-            
-            for idx, line in enumerate(lines):
-                if line.strip() == "":
-                    tex_lines.append("%")
-                else:
-                    tex_lines.append(line)
-                tex_to_md_map[current_tex_line] = (md_line, md_end_line, is_block)
-                current_tex_line += 1
-                
-            tex_lines.append(r"$")
-            current_tex_line += 1
-            
+            math_content, md_line = item
+            md_end_line = md_line + math_content.count('\n')
+        out.append(_Snippet(math_content, is_block, md_line, md_end_line))
+    return out
+
+
+def _document(snippets, extra_preamble):
+    """The TeX source for *snippets*, and where each of its lines came from."""
+    tex_lines = [r"\documentclass{article}", *PREAMBLE, *extra_preamble,
+                 r"\begin{document}"]
+    preamble_end = len(tex_lines)
+    tex_to_md = {}
+    for snip in snippets:
+        if snip.is_block:
+            stripped = snip.tex.strip()
+            wrapped = not any(stripped.startswith(rf"\begin{{{env}}}")
+                              for env in _TOP_LEVEL_ENVS)
+            opener, closer = ((r"\begin{equation*}", r"\end{equation*}")
+                              if wrapped else (None, None))
+        else:
+            opener, closer = "$", "$"
+        if opener:
+            tex_lines.append(opener)
+        for line in snip.tex.split('\n'):
+            tex_lines.append(line if line.strip() else "%")
+            tex_to_md[len(tex_lines)] = snip
+        if closer:
+            tex_lines.append(closer)
         tex_lines.append("")
-        current_tex_line += 1
-
-    # Extract block math
-    for item in valid_blocks:
-        if len(item) == 3:
-            math_content, md_line, md_end_line = item
-        else:
-            math_content, md_line = item
-            md_end_line = md_line + math_content.count('\n')
-        add_snippet(math_content, True, md_line, md_end_line)
-
-    # Extract inline math
-    for item in valid_inlines:
-        if len(item) == 3:
-            math_content, md_line, md_end_line = item
-        else:
-            math_content, md_line = item
-            md_end_line = md_line + math_content.count('\n')
-        add_snippet(math_content, False, md_line, md_end_line)
-
     tex_lines.append(r"\end{document}")
-    
-    if len(tex_to_md_map) == 0:
-        return []
+    return "\n".join(tex_lines), tex_to_md, preamble_end
 
-    tex_source = "\n".join(tex_lines)
-    
-    with tempfile.TemporaryDirectory() as tempdir:
-        tex_file = os.path.join(tempdir, "temp.tex")
-        with open(tex_file, "w", encoding="utf-8") as f:
+
+def _compile(snippets, extra_preamble, timeout):
+    """One pdflatex run. (finished, issues) — finished is False on a timeout."""
+    tex_source, tex_to_md, preamble_end = _document(snippets, extra_preamble)
+    # A killed pdflatex can hold its files for a moment after it is gone on
+    # Windows; failing to delete a temporary directory is not a check failing.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tempdir:
+        with open(os.path.join(tempdir, "temp.tex"), "w", encoding="utf-8") as f:
             f.write(tex_source)
-            
-        cmd = ["pdflatex", "-interaction=nonstopmode", "temp.tex"]
-        subprocess.run(cmd, cwd=tempdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
+        rc = run_with_deadline(["pdflatex", "-interaction=nonstopmode", "temp.tex"],
+                               cwd=tempdir, timeout=timeout)
+        if rc is None:
+            return False, []
         log_file = os.path.join(tempdir, "temp.log")
-        if os.path.exists(log_file):
-            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                log_content = f.read().splitlines()
-                
-            parsed_errors = parse_latex_log(log_content)
-            for parsed in parsed_errors:
-                tex_line = parsed["tex_line"]
-                error = parsed["error"]
-                part1 = parsed["part1"]
-                part2 = parsed["part2"]
-                
-                # Filter out cascading parser recovery errors
-                err_lower = error.lower()
-                cascade_indicators = [
-                    "missing $ inserted",
-                    "display math should end with $$",
-                    "bad math environment delimiter",
-                    "extra }, or forgotten $",
-                    "missing } inserted",
-                    "allowed only in math mode"
-                ]
-                if any(ind in err_lower for ind in cascade_indicators):
-                    continue
-                
-                info = tex_to_md_map.get(tex_line)
-                if info is None:
-                    for offset in range(1, 10):
-                        if (tex_line - offset) in tex_to_md_map:
-                            info = tex_to_md_map[tex_line - offset]
-                            break
-                
-                if info:
-                    md_line, md_end_line, is_block = info
-                else:
-                    md_line, md_end_line, is_block = "Unknown", "Unknown", True
-                
-                part2_stripped = part2.lstrip()
-                combined = part1 + part2_stripped
-                pointer = " " * len(part1) + "^"
-                context = f"{combined}\n{pointer}"
-                
-                issues.append({
-                    "md_line": md_line,
-                    "md_end_line": md_end_line,
-                    "error": error,
-                    "context": context,
-                    "is_block": is_block
-                })
-                    
+        if not os.path.exists(log_file):
+            return True, []
+        with open(log_file, "rb") as f:
+            log_content = f.read(_LOG_READ_LIMIT).decode("utf-8", errors="ignore").splitlines()
+
+    issues = []
+    for parsed in parse_latex_log(log_content):
+        tex_line = parsed["tex_line"]
+        error = parsed["error"]
+        part1 = parsed["part1"]
+        part2 = parsed["part2"]
+
+        # Filter out cascading parser recovery errors
+        err_lower = error.lower()
+        if any(ind in err_lower for ind in _CASCADE_INDICATORS):
+            continue
+
+        combined = part1 + part2.lstrip()
+        context = f"{combined}\n{' ' * len(part1)}^"
+
+        if tex_line <= preamble_end:
+            # Not a formula's fault: a line the project or the paper's own
+            # definitions added. Said once, as what it is.
+            issues.append({
+                "md_line": 1, "md_end_line": 1,
+                "error": f"the preamble this check compiles against does not "
+                         f"compile (config.yaml math.preamble, or the paper's "
+                         f"*.macros.tex): {error}",
+                "context": context, "is_block": True,
+            })
+            continue
+
+        snip = tex_to_md.get(tex_line)
+        if snip is None:
+            for offset in range(1, 10):
+                if (tex_line - offset) in tex_to_md:
+                    snip = tex_to_md[tex_line - offset]
+                    break
+
+        if snip is not None:
+            md_line, md_end_line, is_block = snip.md_line, snip.md_end_line, snip.is_block
+        else:
+            md_line, md_end_line, is_block = "Unknown", "Unknown", True
+
+        issues.append({
+            "md_line": md_line,
+            "md_end_line": md_end_line,
+            "error": error,
+            "context": context,
+            "is_block": is_block
+        })
+    return True, issues
+
+
+def _find_looping_formula(snippets, extra_preamble):
+    """The one formula a compile never finishes on, or None.
+
+    Bisection, keeping whichever half still does not finish. The last step
+    compiles the suspect alone with a generous deadline: a busy machine can
+    make a half look stuck, and blaming a formula that is merely slow would
+    send somebody to rewrite correct TeX.
+    """
+    suspects = list(snippets)
+    while len(suspects) > 1:
+        half = len(suspects) // 2
+        left, right = suspects[:half], suspects[half:]
+        finished, _ = _compile(left, extra_preamble,
+                               deadline_for(len(left), BISECT_FLOOR))
+        suspects = right if finished else left
+    finished, _ = _compile(suspects, extra_preamble, deadline_for(1))
+    return None if finished else suspects[0]
+
+
+def _loop_issue(snip, seconds):
+    excerpt = " ".join(snip.tex.split())
+    return {
+        "md_line": snip.md_line,
+        "md_end_line": snip.md_end_line,
+        "error": (f"pdflatex never finishes on this formula — compiled alone it "
+                  f"was still running after {seconds:.0f} s, so it loops rather "
+                  f"than failing. LaTeXML's `\\\\` + `\\vskip` is the known cause "
+                  f"(write `\\\\[<length>]`); anything else here is new"),
+        "context": excerpt[:160] + ("…" if len(excerpt) > 160 else ""),
+        "is_block": snip.is_block,
+    }
+
+
+def _survive_a_loop(snippets, extra_preamble):
+    """Find what looped, set it aside, and check everything else anyway."""
+    found, remaining = [], list(snippets)
+    for _ in range(MAX_LOOPS):
+        culprit = _find_looping_formula(remaining, extra_preamble)
+        if culprit is None:
+            first, last = remaining[0], remaining[-1]
+            return found + [{
+                "md_line": first.md_line,
+                "md_end_line": last.md_end_line,
+                "error": (f"pdflatex did not finish within "
+                          f"{deadline_for(len(remaining)):.0f} s and no single formula "
+                          f"reproduces it alone, so the pdflatex pass did not run "
+                          f"for these lines (the structural checks did)"),
+                "context": "",
+                "is_block": True,
+            }]
+        found.append(_loop_issue(culprit, deadline_for(1)))
+        remaining = [s for s in remaining if s is not culprit]
+        if not remaining:
+            return found
+        finished, issues = _compile(remaining, extra_preamble,
+                                    deadline_for(len(remaining)))
+        if finished:
+            return found + issues
+    first, last = remaining[0], remaining[-1]
+    return found + [{
+        "md_line": first.md_line,
+        "md_end_line": last.md_end_line,
+        "error": (f"stopped after {MAX_LOOPS} formulas that each make pdflatex "
+                  f"loop; the rest of this file was not compiled"),
+        "context": "",
+        "is_block": True,
+    }]
+
+
+def validate_math_pdflatex(valid_blocks, valid_inlines, *, preamble=(), timeout=None):
+    """Every error pdflatex reports on these formulas — all of them.
+
+    Returns the whole list. It used to stop at fifteen per file, and the
+    worklist's `count` was that capped number: one real paper reported 15 and
+    had 137. Callers that want a short view shorten it themselves and say so.
+
+    *preamble* is appended after the standard one — a project's
+    `math.preamble`, a paper's recovered macro definitions. *timeout* is for
+    the first compile; the default scales with the number of formulas.
+    """
+    snippets = _snippets(valid_blocks, True) + _snippets(valid_inlines, False)
+    if not snippets:
+        return []
+    extra = list(preamble or ())
+
+    finished, issues = _compile(snippets, extra,
+                                timeout if timeout is not None else deadline_for(len(snippets)))
+    if not finished:
+        issues = _survive_a_loop(snippets, extra)
+
     seen = set()
     unique_issues = []
     for issue in issues:
@@ -347,8 +535,7 @@ def validate_math_pdflatex(valid_blocks, valid_inlines):
         if key not in seen:
             seen.add(key)
             unique_issues.append(issue)
-            
-    return unique_issues[:15]
+    return unique_issues
 
 # --------------------------------------------------------------------------
 # Prose that ended up inside a display block.
@@ -453,7 +640,7 @@ def _entry(root: Path, path: Path, issue: dict, detector: str, lines: list[str])
         "line": start,
         "end_line": end,
         "kind": "block" if issue["is_block"] else "inline",
-        "detector": detector,
+        "detector": issue.get("detector", detector),
         "error": issue["error"],
         # A macro pdflatex does not know is usually a package it does not load,
         # not a typo — rewriting those on sight corrupts correct formulas.
@@ -467,33 +654,84 @@ def _entry(root: Path, path: Path, issue: dict, detector: str, lines: list[str])
     }
 
 
+#: The definitions an ingest route recovered from a paper's own LaTeX source,
+#: kept next to the paper as `<stem>.macros.tex`.
+MACROS_SUFFIX = ".macros.tex"
+
+
+def project_preamble(start) -> list[str]:
+    """Lines a project adds to the checker's preamble: `math.preamble`.
+
+    A list of lines, or one string, in the project's config.yaml — for the
+    package or macro a whole library leans on and this checker does not load.
+    """
+    try:
+        from magi.core.config_loader import get, load_config
+
+        value = get(load_config(start=start), "math.preamble", None)
+    except Exception:  # noqa: BLE001 — no config is not a check failing
+        return []
+    if not value:
+        return []
+    if isinstance(value, str):
+        return value.splitlines()
+    return [str(v) for v in value]
+
+
+def paper_preamble(path: Path) -> list[str]:
+    """The macro definitions recovered from this paper's source, if any."""
+    side = path.with_name(path.stem + MACROS_SUFFIX)
+    try:
+        return side.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def check_file(root: Path, path: Path, *, use_pdflatex=True, project_lines=()) -> list[dict]:
+    """Every broken formula in one file, as worklist entries.
+
+    One function for both a directory run and a single named file, so the two
+    cannot drift — they had: only the directory run caught an exception from
+    the pdflatex pass, and it caught it by returning nothing.
+    """
+    content = path.read_text(encoding="utf-8", errors="replace")
+    lines = content.split("\n")
+    issues, valid_blocks, valid_inlines = validate_math_pylatexenc(content)
+    out = [_entry(root, path, it, "pylatexenc", lines) for it in issues]
+    # Pure Python, so it runs whether or not a LaTeX toolchain exists —
+    # and it is the only detector that sees the commonest defect.
+    out.extend(_entry(root, path, it, "prose", lines)
+               for it in detect_prose_blocks(content))
+    if use_pdflatex and (valid_blocks or valid_inlines):
+        extra = list(project_lines) + paper_preamble(path)
+        try:
+            deep = validate_math_pdflatex(valid_blocks, valid_inlines, preamble=extra)
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            deep = [{
+                "md_line": 1, "md_end_line": 1, "is_block": True, "context": "",
+                "error": (f"the pdflatex pass could not run on this file "
+                          f"({type(exc).__name__}: {exc}); the structural checks did"),
+            }]
+        out.extend(_entry(root, path, it, "pdflatex", lines) for it in deep)
+    return out
+
+
 def collect_issues(root, use_pdflatex=True, on_progress=None):
     """Every broken formula under *root*, as an addressable worklist."""
     from magi.core.wiki_common import corpus_files
 
     root = Path(root).resolve()
     files = corpus_files(root)
+    project_lines = project_preamble(root) if use_pdflatex else []
     out = []
     for i, path in enumerate(files, 1):
         if on_progress:
             on_progress(i, len(files), path)
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
+            out.extend(check_file(root, path, use_pdflatex=use_pdflatex,
+                                  project_lines=project_lines))
         except OSError:
             continue
-        lines = content.split("\n")
-        issues, valid_blocks, valid_inlines = validate_math_pylatexenc(content)
-        out.extend(_entry(root, path, it, "pylatexenc", lines) for it in issues)
-        # Pure Python, so it runs whether or not a LaTeX toolchain exists —
-        # and it is the only detector that sees the commonest defect.
-        out.extend(_entry(root, path, it, "prose", lines)
-                   for it in detect_prose_blocks(content))
-        if use_pdflatex and (valid_blocks or valid_inlines):
-            try:
-                deep = validate_math_pdflatex(valid_blocks, valid_inlines)
-            except Exception:
-                deep = []
-            out.extend(_entry(root, path, it, "pdflatex", lines) for it in deep)
     return out
 
 
@@ -511,11 +749,18 @@ def format_issue_for_cli(issue):
 # every one buries the shape of the problem. --json is the complete list.
 _MAX_PER_FILE = 6
 
+#: Words in an error that mean LaTeXML damage `magi math repair` rebuilds.
+_REPAIRABLE = ("magi math repair",)
 
-def _summarize(entries, root):
+
+def _summarize(entries, where, *, total=None, single_file=False):
     """Human view: what kind of damage, where, and what to run next."""
+    total = len(entries) if total is None else total
     if not entries:
-        print(f"All formulas under {root} parse cleanly.")
+        # Named for what was checked. Given one file, this used to report on
+        # the directory that file sits in.
+        scope = "in" if single_file else "under"
+        print(f"All formulas {scope} {where} parse cleanly.")
         return
 
     by_file = {}
@@ -524,6 +769,7 @@ def _summarize(entries, root):
     wiki = [e for e in entries if e["collection"] == "wiki"]
     prose = [e for e in entries if e["detector"] == "prose"]
     macros = [e for e in entries if e["confidence"] == "likely-macro"]
+    repairable = [e for e in entries if e["detector"] == "hazard"]
 
     # Compiled cards first: those are the ones a reader actually opens.
     for path in sorted(by_file, key=lambda p: (not p.startswith("wiki/"), p)):
@@ -538,16 +784,20 @@ def _summarize(entries, root):
         if len(items) > _MAX_PER_FILE:
             print(f"  … and {len(items) - _MAX_PER_FILE} more in this file")
 
-    print(f"\n{len(entries)} formula(s) in {len(by_file)} file(s) need attention.")
+    shown = "" if total == len(entries) else f" (showing {len(entries)} of {total})"
+    print(f"\n{total} formula(s) in {len(by_file)} file(s) need attention{shown}.")
     if prose:
         print(f"  {len(prose)} are prose swallowed by an unclosed $$ — the usual ingest damage")
+    if repairable:
+        print(f"  {len(repairable)} are arXiv-HTML conversion damage — "
+              f"`magi math repair --dry-run` shows the mechanical fix")
     if wiki:
         print(f"  {len(wiki)} are in compiled cards under wiki/ — fix these first")
     else:
         print("  none are in wiki/ — your compiled cards are clean")
     if macros:
         print(f"  {len(macros)} may be package macros rather than typos; check the source PDF")
-    print("\nDeterministic pass first:  magi math format")
+    print("\nDeterministic pass first:  magi math format --dry-run, then magi math format")
     print("Then work the list:        magi math check --json")
     print("                           (the tidy skill drives that list, one at a time)")
 
@@ -565,6 +815,8 @@ def main(argv=None):
                         help="Structural checks only — skip the per-file pdflatex pass")
     parser.add_argument("--wiki-only", action="store_true",
                         help="Only compiled cards under wiki/, not raw ingest output")
+    parser.add_argument("--limit", type=int, default=None, metavar="N",
+                        help="Report at most N entries; `total` still counts all of them")
     args = parser.parse_args(argv)
 
     target = args.target
@@ -588,18 +840,13 @@ def main(argv=None):
               "inside display blocks only.", file=sys.stderr)
 
     root = Path(target).resolve()
-    if root.is_file():
+    single_file = root.is_file()
+    where = root
+    if single_file:
         # One file still goes through the worklist so --json means one thing.
-        entries = []
-        content = root.read_text(encoding="utf-8", errors="replace")
-        issues, blocks, inlines = validate_math_pylatexenc(content)
-        lines = content.split("\n")
-        entries.extend(_entry(root.parent, root, it, "pylatexenc", lines) for it in issues)
-        entries.extend(_entry(root.parent, root, it, "prose", lines)
-                       for it in detect_prose_blocks(content))
-        if has_pdflatex and (blocks or inlines):
-            entries.extend(_entry(root.parent, root, it, "pdflatex", lines)
-                           for it in validate_math_pdflatex(blocks, inlines))
+        project_lines = project_preamble(root.parent) if has_pdflatex else []
+        entries = check_file(root.parent, root, use_pdflatex=has_pdflatex,
+                             project_lines=project_lines)
         root = root.parent
     else:
         # pdflatex runs once per file and a real library takes minutes, so say
@@ -619,15 +866,23 @@ def main(argv=None):
     if args.wiki_only:
         entries = [e for e in entries if e["collection"] == "wiki"]
 
+    total = len(entries)
+    shown = entries if args.limit is None else entries[:max(0, args.limit)]
+
     if args.json:
         print(json.dumps({
             "root": str(root),
             "detector": "pylatexenc+pdflatex" if has_pdflatex else "pylatexenc",
-            "count": len(entries),
-            "issues": entries,
+            # `count` is what is in `issues`; `total` is what exists. They
+            # were the same number until --limit, and before that `count` was
+            # silently capped at fifteen per file.
+            "count": len(shown),
+            "total": total,
+            "truncated": len(shown) < total,
+            "issues": shown,
         }, ensure_ascii=False, indent=2))
     else:
-        _summarize(entries, root)
+        _summarize(shown, where, total=total, single_file=single_file)
     return 1 if entries else 0
 
 if __name__ == '__main__':

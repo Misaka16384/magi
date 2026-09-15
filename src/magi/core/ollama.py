@@ -267,3 +267,99 @@ def reset_cache() -> None:
     """Forget start attempts — for tests, and for long-lived servers."""
     with _attempts_lock:
         _attempts.clear()
+
+
+# --------------------------------------------------------------------------
+# letting go of the model
+#
+# Ollama keeps a model in memory for five minutes after its last request
+# unless told otherwise, and MAGI never told it: every command that embedded
+# anything left qwen3-embedding holding ~2 GB of RAM and ~2.4 GB of VRAM for
+# five minutes after it had exited (measured with `ollama ps` on the machine
+# that asked for this, 15 s samples either side of a `magi index`).
+#
+# Not by sending `keep_alive: 0` on each request — that unloads between
+# batches, and an index run would reload the model thousands of times. The
+# model stays loaded while the command runs and is unloaded once, when the
+# process ends. Measured: `/api/generate` with `keep_alive: 0` and no prompt
+# answers `done_reason: "unload"` in 10 ms, embedding-only models included.
+# --------------------------------------------------------------------------
+
+#: The default for `ollama.keep_alive`: unload when the command ends.
+RELEASE = "release"
+
+
+def keep_alive_policy(value) -> tuple[object | None, bool]:
+    """(`keep_alive` to send with each request or None, unload at exit?).
+
+    `release` / `0` (the default) sends nothing and unloads at exit; `-1` keeps
+    the model loaded indefinitely; a duration such as `"30m"` (or a number of
+    seconds) is passed through for people who want it warm between commands.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, True
+    if isinstance(value, bool):
+        return (None, True) if not value else (-1, False)
+    if isinstance(value, (int, float)):
+        if value == 0:
+            return None, True
+        return (-1, False) if value < 0 else (value, False)
+    text = str(value).strip().lower()
+    if text in (RELEASE, "0", "0s", "0m"):
+        return None, True
+    if text == "-1":
+        return -1, False
+    return str(value).strip(), False
+
+
+def release(base_url: str | None, model: str, timeout: float = 5.0) -> bool:
+    """Ask Ollama to unload *model* now. True when it said it did; never raises."""
+    import json
+    import urllib.request
+
+    if not model:
+        return False
+    request = urllib.request.Request(
+        normalize(base_url) + "/api/generate",
+        data=json.dumps({"model": model, "keep_alive": 0}).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except Exception:  # noqa: BLE001 — unreachable is fine: nothing to unload
+        return False
+
+
+_release_armed: set[tuple[str, str]] = set()
+_release_lock = threading.Lock()
+
+
+def release_at_exit(base_url: str | None, model: str) -> None:
+    """Unload *model* when this process ends — once per server and model.
+
+    Called only after a request to that model succeeded, so a command that
+    never embedded never touches a model somebody else loaded.
+    """
+    # For the test suite: an unload fired at interpreter exit would reach the
+    # developer's real Ollama and take a model out from under whatever else
+    # is using it.
+    if os.environ.get("MAGI_NO_OLLAMA_RELEASE"):
+        return
+    key = (normalize(base_url), model)
+    with _release_lock:
+        if key in _release_armed:
+            return
+        _release_armed.add(key)
+    import atexit
+
+    atexit.register(release, key[0], model)
+
+
+def configured_keep_alive(start=None):
+    """`ollama.keep_alive` from the config nearest *start* (default: release)."""
+    try:
+        from magi.core.config_loader import get as cfg_get, load_config
+
+        return cfg_get(load_config(start=start), "ollama.keep_alive", RELEASE)
+    except Exception:  # noqa: BLE001
+        return RELEASE

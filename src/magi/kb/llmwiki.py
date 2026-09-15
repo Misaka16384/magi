@@ -517,6 +517,17 @@ def read_document(ctx: LintContext, path: Path) -> Document | None:
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
     if not text.startswith("---\n"):
+        # A draft is working-out, not a card: nothing compiles it, and no
+        # field of a card means anything on it. Demanding frontmatter there
+        # was 20 critical issues on 20 drafts — and the frontmatter that would
+        # have silenced them carries a `category`, which is what `lint --fix`
+        # reads to decide which directory a card belongs in.
+        try:
+            in_drafts = path.resolve().relative_to(ctx.root).parts[:1] == ("drafts",)
+        except ValueError:
+            in_drafts = False
+        if in_drafts:
+            return Document(path=path, frontmatter={}, body=text, raw_text=text)
         ctx.issue("critical", "Markdown file is missing YAML frontmatter.", path)
         return None
     end = text.find("\n---", 4)
@@ -770,7 +781,10 @@ def check_structure(ctx: LintContext) -> None:
         ("raw/articles", "Articles"),
         ("raw/papers", "Papers"),
         ("raw/repos", "Repos"),
-        ("raw/notes", "Notes"),
+        # No raw/notes: a folder with that name next to the sources invited a
+        # person's own notes into the one tree that is never worked on again.
+        # Theirs go in drafts/ or inbox/notes.md; an existing raw/notes/ is
+        # still a normal indexed directory.
         ("raw/data", "Data"),
         ("wiki", "Wiki"),
         ("wiki/concepts", "Concepts"),
@@ -833,11 +847,12 @@ def check_frontmatter_schema(ctx: LintContext) -> None:
         if not parts:
             continue
         if parts[0] == "raw":
+            # The four fields the guide lists for a source ("What a card looks
+            # like"). tags and summary were warned on as well — 34 warnings on
+            # 17 freshly ingested papers — for enrichment no ingest route can
+            # infer and nothing reads from raw/: tags belong to the compiled
+            # card. A warning every file carries is a warning nobody reads.
             require_fields(ctx, doc, ["title", "source", "type", "ingested"])
-            # tags/summary on raw conversions are enrichment the ingest tools
-            # cannot infer — flag them, but a fresh `magi ingest tex` output
-            # must not fail its own toolchain's lint.
-            require_fields(ctx, doc, ["tags", "summary"], severity="warning")
             check_enum(ctx, doc, "type", RAW_TYPES)
         elif parts[0] == "wiki":
             if doc.frontmatter.get("type") == "thesis":
@@ -884,7 +899,12 @@ def check_frontmatter_schema(ctx: LintContext) -> None:
             check_enum(ctx, doc, "schema_status", SCHEMA_STATUSES)
 
         tags = doc.frontmatter.get("tags")
-        if "tags" in doc.frontmatter and (not isinstance(tags, list) or not tags):
+        # Every ingest route writes `tags: []` into a source, and a source has
+        # no tags to give until something compiles it — so an empty list there
+        # is the honest value, not a defect. Anything else still has to be one.
+        empty_on_a_source = parts[0] == "raw" and tags in ([], None)
+        if "tags" in doc.frontmatter and (not isinstance(tags, list) or not tags) \
+                and not empty_on_a_source:
             ctx.issue("warning", "tags must be a non-empty list.", doc.path)
 
 
@@ -1345,6 +1365,10 @@ def check_wikilinks_formatting(ctx: LintContext) -> None:
                 ctx.issue("warning", f"Wikilink [[{link}]] appears to contain a raw mathematical equation or LaTeX code instead of a clean conceptual term. This will lead to malformed filenames.", doc.path)
 
 
+#: Formula errors lint prints per file before it points at `magi math check`.
+LINT_MATH_PER_FILE = 15
+
+
 def check_math_syntax(ctx: LintContext) -> None:
     bin_dir = str(Path(__file__).parent.resolve())
     if bin_dir not in sys.path:
@@ -1403,9 +1427,18 @@ def check_math_syntax(ctx: LintContext) -> None:
                 ctx.cache_data["files"][rel_path_str]["math_issues"] = math_issues
                 ctx.cache_updated = True
 
-        for issue in math_issues:
+        # The validator returns every error now; lint is a health report, so it
+        # shows the first few per file and says how many it did not print —
+        # rather than the validator deciding that fifteen is all there are.
+        for issue in math_issues[:LINT_MATH_PER_FILE]:
             formatted_msg = format_issue_for_cli(issue)
             ctx.issue(severity, formatted_msg, doc.path)
+        if len(math_issues) > LINT_MATH_PER_FILE:
+            ctx.issue(severity,
+                      f"{len(math_issues) - LINT_MATH_PER_FILE} more formula error(s) in "
+                      f"this file — `magi math check {rel.as_posix()}` lists all "
+                      f"{len(math_issues)}",
+                      doc.path)
 
 
 
@@ -2069,6 +2102,32 @@ def extract_wikilinks(text: str) -> list[str]:
     return re.findall(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", text)
 
 
+_MD_LINK_RE = re.compile(r'(?<!!)\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)')
+
+
+def check_markdown_links(source: Path, body: str) -> tuple[list[str], list[str]]:
+    """(valid, dangling) relative `[text](path)` links in *body*, resolved from *source*.
+
+    Only links to files: web addresses, mail and in-page anchors are not this
+    check's to judge. Code is skipped, so an example link inside a snippet is
+    not reported as broken.
+    """
+    from urllib.parse import unquote
+
+    prose = re.sub(r"```.*?```", "", body, flags=re.S)
+    prose = re.sub(r"`[^`\n]*`", "", prose)
+    valid, dangling = [], []
+    for target in dict.fromkeys(m.group(1) for m in _MD_LINK_RE.finditer(prose)):
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target) or target.startswith("#"):
+            continue
+        path_part = unquote(target.split("#", 1)[0].split("?", 1)[0])
+        if not path_part:
+            continue
+        resolved = (source.parent / path_part).resolve()
+        (valid if resolved.exists() else dangling).append(target)
+    return valid, dangling
+
+
 #: What each `magi stats` subcommand answers, for the bare invocation.
 _STATS_SUBCOMMANDS = (
     ("concept-density", "how densely one card links to concepts"),
@@ -2089,6 +2148,17 @@ def run_stats(args: argparse.Namespace) -> int:
         print("\nSyntax: magi stats <subcommand> --help")
         return 2
 
+    # `magi stats <file> verify-refs` reads naturally and used to fail:
+    # argparse handed the file to the root argument and left the subcommand
+    # without one. A file there is the file to check, in the project it is in.
+    if subcmd == "verify-refs" and not getattr(args, "file", None):
+        given = Path(args.path) if getattr(args, "path", None) else None
+        if given is None or not given.is_file():
+            raise SystemExit("magi stats verify-refs <file> — which file?")
+        from magi.core.workspace import find_workspace_root
+
+        args.file = str(given.resolve())
+        args.path = str(find_workspace_root(start=given) or given.resolve().parent)
     root = resolve_wiki_root(args)
 
     if subcmd == "concept-density":
@@ -2126,6 +2196,7 @@ def run_stats(args: argparse.Namespace) -> int:
         text = target.read_text(encoding="utf-8")
         parts = split_markdown_frontmatter(text)
         body = parts[1] if parts else text
+        md_valid, md_dangling = check_markdown_links(target, body)
         links = sorted(set(extract_wikilinks(body)))
         concepts_dir = root / "wiki" / "concepts"
         refs_dir = root / "wiki" / "references"
@@ -2150,7 +2221,13 @@ def run_stats(args: argparse.Namespace) -> int:
             "file": str(target),
             "valid_refs": valid,
             "dangling_refs": dangling,
-            "dangling_count": len(dangling),
+            # Relative Markdown links are references too. A draft citing
+            # sixteen papers as `[text](../../raw/papers/…)` came back
+            # `valid_refs: []`, `dangling_count: 0` — every link ignored, so a
+            # broken one would have passed just the same.
+            "valid_links": md_valid,
+            "dangling_links": md_dangling,
+            "dangling_count": len(dangling) + len(md_dangling),
         }
         print(json.dumps(report, indent=2))
         return 0
@@ -2666,7 +2743,9 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-refs",
         help="Check that [[wikilink]] targets exist as files.",
     )
-    stats_verify.add_argument("file", help="Markdown file to check.")
+    stats_verify.add_argument("file", nargs="?",
+                              help="Markdown file to check (it may also come before the "
+                                   "subcommand: magi stats <file> verify-refs)")
 
     stats_summary = stats_sub.add_parser(
         "wiki-summary",

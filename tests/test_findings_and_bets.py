@@ -143,7 +143,9 @@ def test_a_young_proposition_is_not_chased(ws):
     proposition(ws, "p-new", status="testing", when=at(days_ago=1), bet="unknown")
     st = state.load(ws, now=NOW)
     work = [a for a in state.candidates(st, now=NOW) if a.key == "work"][0]
-    assert "oldest open work" in work.why
+    # Alone on its line it is "the open work", not "the oldest" of one.
+    assert "open work on this line" in work.why
+    assert "oldest" not in work.why
     assert "post what you found" not in work.why
 
 

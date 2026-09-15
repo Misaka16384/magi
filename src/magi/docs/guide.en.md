@@ -12,9 +12,8 @@ From nothing to a project you can search — three commands and one sentence to 
 
 ```powershell
 pipx upgrade --install magi-research     # 1. install or upgrade (idempotent)
-mkdir my-topic ; cd my-topic ; magi init # 2. one project
-magi install                             # 3. into your agent CLI: skills, protocol, stop gate
-magi ingest auto                         # after dropping PDFs into inbox/
+mkdir my-topic ; cd my-topic ; magi init # 2. one project, installed into every agent CLI found
+magi ingest auto                         # 3. after dropping PDFs into inbox/
 ```
 
 One directory per project, and nothing above it. **Cross-project search runs off the
@@ -41,13 +40,17 @@ An agent's context is disposable — **state always lives on disk**. So any step
 
 ### Three ways to get started
 
-**① Brand-new user** — install per Chapter 2, then two commands:
+**① Brand-new user** — install per Chapter 2, then one command:
 
 ```powershell
 mkdir quantum-toys ; cd quantum-toys
-magi init --name "Quantum Toys" --scope "Quantum phenomena in toy models"
-magi install                 # skills + the AGENTS.md protocol block + the session hooks
+magi init --title "Quantum Toys" --scope "Quantum phenomena in toy models"
 ```
+
+`magi init` scaffolds the project and installs it into every agent CLI it finds
+— skills, the AGENTS.md protocol block, the session hooks (`--no-install` skips
+that; `magi install` does it later). Run on a terminal without `--title` and
+`--scope`, it asks for both; `magi config set title|scope` changes them any time.
 
 After that, one word. Bare `magi` is `magi next`: it derives what this
 project needs from its own notes and proposes it — including `magi sync --fix`
@@ -61,7 +64,7 @@ No propositions yet — nothing here is being tested yet.
 
 **② Existing Wikify user** — leave your data as-is; jump straight to Chapter 3, three commands to migrate.
 
-**③ Just want to try it** — `magi init` works right away in any empty directory, and it registers the project so `magi search` finds it from anywhere else too.
+**③ Just want to try it** — `magi init` works right away in any directory — it only adds files — and it registers the project so `magi search` finds it from anywhere else too.
 
 ### How to read this manual {#howto-read}
 
@@ -516,7 +519,7 @@ data, arranged however they ended up — goes this way instead:
 
 ```powershell
 magi adopt survey .                     # read-only inventory; nothing moves
-magi init --name "..." --scope "..."    # scaffold in place: only adds files
+magi init --title "..." --scope "..."   # scaffold in place: only adds files
 magi adopt apply plan.json --dry-run    # what would move, what gets repointed
 magi adopt apply plan.json
 ```
@@ -545,6 +548,12 @@ The plan is JSON, written by the agent and read by a person:
 {"moves": [{"from": "gate0", "to": "drafts/gate0"},
            {"from": "notes", "to": "drafts/notes"}]}
 ```
+
+Material that has to stay where it is — notes tracked in another repository —
+is copied instead of moved: give its absolute path as `from` and run
+`magi adopt apply plan.json --copy`. The originals are never touched, the
+references between the copied files are repaired exactly as for a move, and
+`magi adopt undo` removes the copies.
 
 ### The references get repaired {#adopt-links}
 
@@ -580,7 +589,8 @@ repositories.
 
 > [!NOTE]
 > `apply` never deletes, never overwrites, never moves anything out of the
-> project, and never touches MAGI's own scaffold. One invalid entry means the
+> project (`--copy` brings material in; it never takes any out), and never
+> touches MAGI's own scaffold. One invalid entry means the
 > whole plan is refused: a half-adopted folder is worse than an untouched one.
 
 The matching skill is `adopt` — an operating manual for the agent, so a person
@@ -590,12 +600,27 @@ propositions" was tidied, not adopted.
 
 ## Setting up your project {#workspace}
 
-Two commands make a project:
+One command makes a project:
 
 ```powershell
-magi init               # inside the project's own folder
-magi install            # into your agent CLI: skills, protocol block, stop gate
+magi init               # in the project's own folder: scaffold, title and scope, every agent CLI found
 ```
+
+The title and scope are asked for on a terminal. Anywhere else the folder's
+name becomes the title and the scope stays a placeholder, which `magi init`
+names at the end. Both can change at any time, and the protocol block every
+agent reads is re-rendered with them:
+
+```powershell
+magi config set title "Mobility fusion"
+magi config set scope "Fusion rules of fracton mobility"
+magi config get                              # both, and where the settings live
+magi config set research.coaching strict     # any config.yaml key, as section.key
+```
+
+In a folder that already holds work, `magi init` names what it found and
+touches none of it; `magi adopt survey .` is the next step. An existing
+`.gitignore` gets MAGI's lines appended, never replaced.
 
 One directory per project, and nothing above it. A second project is a second directory anywhere you like; they find each other through the user-level registry, not through a shared parent. Below: what gets generated, how to manage projects, and how MAGI decides which project it is looking at.
 
@@ -607,14 +632,19 @@ it in a user-level list, and that list is what ties them together:
 
 ```powershell
 mkdir my-topic ; cd my-topic
-magi init --name "Display name" --scope "one line on what belongs here and what does not"
-magi install
+magi init --title "Display name" --scope "one line on what belongs here and what does not"
 magi pm init           # optional: a task store for mechanical work (git-inits the directory)
 ```
 
 `magi search` reads only the project you are standing in; `--scope all` adds the
 ones `research.search_projects` names. `magi kb list`
-shows them. v1's hub — a parent directory with `wikis.json` and `topics/` — is
+shows them; `magi kb prune` drops the ones whose directory is gone, and
+`magi kb prune --temp` also drops projects living under the system temp
+directory — tests' and agents' scratch workspaces.
+
+A project that is a folder inside a larger git repository gets no `pm init`
+suggestion from `magi sync`, and `magi pm init` there wants `--yes`: bd would
+commit into that repository. v1's hub — a parent directory with `wikis.json` and `topics/` — is
 gone: the registry was the part doing the work, and it is now per-machine, so a
 project is findable wherever it lives.
 
@@ -633,7 +663,7 @@ my-topic/
 ├─ decisions.md            what a person decided, and nothing else; an agent transcribes it
 ├─ inbox/                  drop zone for unprocessed material (dump PDFs here) · notes.md is your unsorted scratch box
 ├─ raw/                    ingested source literature, as Markdown
-│   articles/ papers/ repos/ notes/ data/
+│   articles/ papers/ repos/ data/
 ├─ wiki/                   compiled output
 │   concepts/  concept cards    references/ reference cards    topics/  topic pages
 ├─ threads/                propositions, questions, research lines (a forum; `magi thread`)
@@ -767,6 +797,7 @@ magi ingest url 2608.16520 --expect "fracton"   # an id from memory: fetch the t
 magi ingest batch-run                                 # fetch + convert, unattended
 magi ingest review                                    # see what came out
 magi ingest review --item <ID> --decision approve      # one at a time
+magi ingest review --approve-all                      # or every item that converted, once you have read the list
 magi ingest review --commit                           # only now does anything enter raw/
 ```
 
@@ -778,7 +809,12 @@ Two things about this worth knowing:
 **It tries the best source first.** arXiv publishes its own LaTeXML rendering of
 most papers, and every formula in it carries the original LaTeX verbatim — no
 recognition involved. That is tried before the source tarball, which is tried
-before any PDF route.
+before any PDF route. The HTML route also reads the paper's LaTeX source — not
+to convert it, only for the author's own macros — and repairs what LaTeXML and
+pandoc do to the *layout* of formulas (see [Formulas](#compile-math)). Review
+reports what it could not repair as `math-layout-left`, and every formula that
+will still fail `magi math check` as `math-damage`, before anything is
+committed.
 
 For a PDF the same principle applies one rung further down. Before spending a
 MinerU token or a GPU minute, MAGI asks whether the document needs either: a
@@ -832,7 +868,7 @@ magi ingest auto --dry-run        # see the routing first
 
 Reach for the specific commands below when you need a page range, want to force a route, or are wrestling with a difficult scan.
 
-**If you can get the arXiv source package, use `tex` first** — it keeps `.bib`/`.bbl` alongside the markdown, and writes the arXiv ID into frontmatter for the radar and `magi bib` to use.
+**For an arXiv paper the queue chooses for you: the HTML rendering first, the source package when there is none.** The rendering carries every formula's TeX verbatim and avoids the source route's measured failures — the wrong main file picked out of a bundle, `\input` stitching, pandoc dying on plain-TeX primitives. Author macros come from the e-print either way: expanded where a formula calls them, and what cannot be expanded is kept beside the paper in `<paper>.macros.tex` for `magi math check`. Run `magi ingest tex` yourself when you want the `.bib`/`.bbl` beside the markdown — only that route keeps them.
 
 Two more supporting routes: `magi ingest assemble` stitches `page_1.md, page_2.md…` — page-by-page transcriptions the agent produced itself — together into one document in page order; `magi ingest crop` crops a region of a PDF into a PNG so you can eyeball a formula directly.
 
@@ -1054,21 +1090,41 @@ magi wiki placeholders wiki/concepts/x.md # Find unfinished placeholder sections
 ### Formulas {#compile-math}
 
 ```powershell
-magi math format                    # Mechanical fixes: pairing $$, \tag placement, eqnarray→align, OCR run-ons
-magi math check                     # Reports only, doesn't fix: sweeps the project, grouped by file
-magi math check --json              # The same, as a worklist you can go through one entry at a time
+magi math repair --dry-run          # arXiv-HTML papers: what LaTeXML and pandoc did to formula layout
+magi math repair                    # …fixed: equation tables, numbers inside formulas, figure code, lost row breaks
+magi math format --dry-run          # the mechanical fixes as a diff; nothing written
+magi math format                    # pairing $$, \tag placement, eqnarray→align, OCR run-ons
+magi math check                     # reports only, doesn't fix: sweeps the project, grouped by file
+magi math check --json              # the same, as a worklist you can go through one entry at a time
+magi math undo                      # put back what the last repair or format run changed
 ```
 
-**Both default to the whole project**, the way `magi lint` does — or name a file
-or directory (`magi math check raw/papers/x.md`) to narrow it. Scoped to
-`wiki/ raw/ drafts/`: `format` edits in place with no dry-run, and `scratch/` is
-where the concept backups live.
+**All of them default to the whole project**, the way `magi lint` does — or name
+a file or directory (`magi math check raw/papers/x.md`) to narrow it. Scoped to
+`wiki/ raw/ drafts/`; `repair` reads `raw/`, and only papers that carry
+LaTeXML's markers. Every run that writes keeps a record under `output/tidy/` —
+each change, with what it replaced — and `magi math undo` puts it back:
+positionally when the file is untouched since, by finding the changed text when
+something else moved it, and not at all where the changed text was edited.
 
-The order is always **format first, then check** — clear the mechanical damage,
-and what remains is worth a human reading.
+The order is always **repair, then format, then check** — clear the mechanical
+damage, and what remains is worth a human reading.
 
-`--fast` skips the per-file pdflatex pass (minutes, on a large project);
-`--wiki-only` narrows to compiled cards.
+`--fast` skips the per-file pdflatex pass; `--wiki-only` narrows to compiled
+cards; `--limit N` caps the entries reported while `total` in `--json` still
+counts all of them. The pdflatex pass runs each file against a deadline —
+thirty seconds plus a hundredth of a second per formula, where 2 000 formulas
+were measured at 0.9 s — and a file that runs past it is bisected until the
+formula that makes pdflatex loop is found and reported on its own; the rest of
+the file is still checked. Formulas known to loop, or that are not mathematics
+at all (`\\` followed by `\vskip`, LaTeXML drawing code, a figure, an equation
+number inside the formula), are reported without ever being compiled.
+
+The checker's preamble loads the common packages when the TeX distribution has
+them — amsmath, physics, bm, mathtools, mathrsfs, dsfont, slashed, cancel,
+xcolor, bbm, yfonts. What a whole project uses beyond that goes in
+`math.preamble` in `config.yaml`; what one paper defines for itself goes in
+`<paper>.macros.tex` beside it, which the arXiv HTML route writes.
 
 `--json` gives one entry per formula, with an `id` (`path:line`, so you can tick
 them off), the line range, the offending TeX verbatim, and a `confidence`:
@@ -1092,7 +1148,10 @@ fix the formulas.
 
 > [!NOTE]
 > `Undefined control sequence` is usually a **false positive** — the checker just doesn't recognize a macro from some package. Spot-check one against the original PDF, and you can ignore the rest of that kind. What you actually need to fix are structural errors like `Double subscript`, `Missing }`, and `Unexpected end of stream`: crop the original text out with `magi ingest crop <pdf> --text "<nearby text>" --out scratch/crop.png` and edit against it.
-> `[WARNING] Orphaned $$ remains on line L` is a boundary case format can't resolve on its own — you have to pair it up by hand.
+> `[WARNING] Orphaned $$ remains on line L` means the `$$` in the file do not pair up. The line named is where the first block would run across a blank line — where a closer went missing — so pair it by hand there.
+
+> [!NOTE]
+> `\text{[omitted: tikz picture: fdot]}` inside a formula is where a figure was. LaTeXML wrote figure code into the formula's TeX, and a picture cannot live there, so `magi math repair` leaves a marker of one fixed shape — an agent compiling the paper can tell it from the author's words.
 
 ---
 
@@ -1222,7 +1281,9 @@ Embedding is the slow half, and on a project first indexed without Ollama it has
 > ```
 > If it ends with `· BM25-only (Ollama unavailable)`, the vector half didn't get built.
 
-Chunks go to Ollama 16 at a time. Set `ollama.embed_batch` in `config.yaml` to change that — higher is faster but uses more memory on the Ollama side, and an embedding server that gets killed halfway through costs more than the throughput is worth.
+Chunks go to Ollama 16 at a time. Set `ollama.embed_batch` in `config.yaml` to change that — higher is faster but uses more memory on the Ollama side, and an embedding server that gets killed halfway through costs more than the throughput is worth. Once enough of a run is behind it, each progress line carries an estimate (`file 12/40, about 9 min left`).
+
+Ollama keeps a model in memory for five minutes after its last request — about 2 GB of RAM and as much GPU memory for `qwen3-embedding:0.6b`. MAGI unloads the embedding model when the command that used it ends: one request at exit, never one per batch, so the model stays loaded for the whole run. `ollama.keep_alive` in `config.yaml` changes that — a duration such as `"30m"` keeps it warm between commands, `-1` keeps it loaded. A long-running `magi ui` unloads it when the server stops; between its searches Ollama's own five minutes apply.
 
 `magi index` also **automatically registers** the current project in the global project table (`~/.config/magi/registry.json`), so other projects can search it too.
 
@@ -1286,7 +1347,9 @@ magi thread new p-dual --kind proposition --title "The dual is a Z2 gauge theory
 magi thread new p-idx --kind proposition --title "Twisted index" --purpose "From the L=128 run" \
   --claim "For h = 1, the twisted index equals 3." --derivation drafts/index.md --evidence tools/index.m2
 magi thread post p-idx --evidence tools/index_check.py --text "second, independent count"
+magi thread post q-count --evidence tools/count.py --text "the enumeration that answers it"   # a question's evidence too
 magi thread claim p-idx --text "For h = 1 and 2, the twisted index equals 3."   # restate, as a recorded change
+magi thread derivation p-idx drafts/index-v2.md --replace   # the argument moved: also a recorded change
 ```
 
 **Title, claim, evidence.** The title is a name; `--claim` is the statement a

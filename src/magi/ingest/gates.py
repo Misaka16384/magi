@@ -423,6 +423,40 @@ def check_text_coverage(md: str, source_chars: int) -> Finding | None:
                    "floor, so something was dropped rather than converted")
 
 
+def check_math_structure(md: str) -> Finding | None:
+    """Formulas that will fail `magi math check`, said at review, not after commit.
+
+    Review used to show `leftover-tex` and nothing about the maths itself, so
+    seventeen papers were approved and committed with 58 equation numbers
+    inside formulas, ~130 figures inside formulas and one formula that hangs
+    pdflatex — all of it found afterwards. These are the structural checks
+    only (no TeX run): cheap enough for every item of a batch.
+    """
+    try:
+        from magi.kb.validate_math_latex import detect_prose_blocks, validate_math_pylatexenc
+    except Exception:  # noqa: BLE001 — a missing optional parser is not a finding
+        return None
+    issues, _, _ = validate_math_pylatexenc(md)
+    issues = list(issues) + detect_prose_blocks(md)
+    if not issues:
+        return None
+
+    def label(issue):
+        if issue.get("detector") == "hazard":
+            return issue["error"].split(" — ")[0]
+        if "consecutive words of prose" in issue["error"]:
+            return "prose inside a display block"
+        return "does not parse"
+
+    kinds = Counter(label(i) for i in issues)
+    lines = [i["md_line"] for i in issues if isinstance(i["md_line"], int)]
+    parts = "; ".join(f"{n} × {k}" for k, n in kinds.most_common(4))
+    where = f", first at line {min(lines)}" if lines else ""
+    return Finding("math-damage",
+                   f"{len(issues)} formula(s) will fail `magi math check` ({parts}{where}) "
+                   "— after commit, `magi math check <file> --json` lists them")
+
+
 def run_all(md: str, *, payload: bytes | None = None, tex_source: str | None = None,
             figures_referenced: int = 0, figures_resolved: int = 0,
             images_dir=None, expected_arxiv_id: str | None = None,
@@ -443,6 +477,7 @@ def run_all(md: str, *, payload: bytes | None = None, tex_source: str | None = N
         check_image_refs(md),
         check_broken_image_links(md, images_dir) if images_dir else None,
         check_environments_closed(md),
+        check_math_structure(md),
         check_repetition(md) if route in RECOGNITION_ROUTES else None,
         check_tables_survived(md, source_tables, source_rows),
         check_text_coverage(md, source_chars),

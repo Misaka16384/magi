@@ -24,9 +24,9 @@ is `magi migrate`, not this.
 5. Show the human the plan, then `magi adopt apply plan.json --dry-run`, then
    for real. `magi adopt undo` puts the files *and* the edited text back.
 6. `magi ingest url <the ids>`, `magi ingest batch-run`, then `ingest`.
-7. The part that matters: open what the material already claims — `magi thread
-   new <slug> --kind proposition --title '<claim>' --purpose '<why now>' --bet
-   unknown`. A plan index and a status board are lines and propositions already.
+7. What matters: open what the material claims. Worked out already, it is a **finding**, no bet to ask:
+   `magi thread new <slug> --kind proposition --title '<claim>' --purpose '<why now>' --found <date> --derivation <draft>`.
+   Only an open conjecture takes `--bet unknown`. A plan index and a status board are lines and propositions already.
 8. `magi index`, then `magi next`. Still "no propositions" means the folder was
    tidied, not adopted.
 

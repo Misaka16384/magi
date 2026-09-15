@@ -349,7 +349,7 @@ def _read_plan(path: Path, root: Path) -> list[tuple[Path, Path]]:
     return moves
 
 
-def _validate(root: Path, moves: list[tuple[Path, Path]]) -> list[str]:
+def _validate(root: Path, moves: list[tuple[Path, Path]], copy: bool = False) -> list[str]:
     errs = []
     seen_dst: set[Path] = set()
     for src, dst in moves:
@@ -357,8 +357,15 @@ def _validate(root: Path, moves: list[tuple[Path, Path]]) -> list[str]:
         if not src.exists():
             errs.append(f"{rel}: nothing there to move")
             continue
-        if not src.is_relative_to(root) or not dst.is_relative_to(root):
+        if not dst.is_relative_to(root):
             errs.append(f"{rel}: a move must stay inside the project")
+            continue
+        if not src.is_relative_to(root) and not copy:
+            # Moving somebody's files out of another folder — often another
+            # repository, where they are tracked — is not adopting them. A
+            # copy is, and leaves the originals exactly where they were.
+            errs.append(f"{rel}: a move must stay inside the project — to bring in "
+                        "material from elsewhere, copy it: --copy")
             continue
         if src == root:
             errs.append(f"{rel}: that is the project itself")
@@ -378,6 +385,54 @@ def _validate(root: Path, moves: list[tuple[Path, Path]]) -> list[str]:
             continue
         seen_dst.add(dst)
     return errs
+
+
+def _stage_copies(root: Path, moves, stamp: str):
+    """Copy what lies outside the project into `scratch/`, and plan from there.
+
+    The flow a person used to do by hand — copy into a staging folder, apply
+    the plan from it, delete the emptied folder. It is also what makes a copy
+    behave like any other adoption: links between the copied files are worked
+    out and repointed by the same code as for a move.
+
+    Copied under their common parent, so two sibling folders keep the relative
+    paths between them that their links depend on.
+    """
+    import shutil
+
+    staging = root / "scratch" / f"adopt-copy-{stamp}"
+    outside = [src for src, _ in moves if not src.is_relative_to(root)]
+    try:
+        common = Path(os.path.commonpath([str(s.parent) for s in outside]))
+    except ValueError:  # different drives: nothing to keep in common
+        common = None
+    out, copied = [], []
+    for i, (src, dst) in enumerate(moves):
+        if src.is_relative_to(root):
+            out.append((src, dst))
+            continue
+        rel = src.relative_to(common) if common is not None else Path(f"{i:03d}") / src.name
+        target = staging / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, target)
+        else:
+            shutil.copy2(src, target)
+        out.append((target, dst))
+        copied.append({"from": str(src), "staged": target.relative_to(root).as_posix()})
+    return staging, out, copied
+
+
+def _discard_staging(root: Path, staging) -> None:
+    """Remove a staging folder `_stage_copies` made — and nothing else, ever."""
+    if staging is None:
+        return
+    import shutil
+
+    staging = Path(staging)
+    if staging.is_dir() and staging.is_relative_to(root / "scratch") \
+            and staging.name.startswith("adopt-copy-"):
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def cmd_survey(args) -> int:
@@ -427,11 +482,24 @@ def cmd_apply(args) -> int:
         print("the plan moves nothing")
         return 0
 
-    errs = _validate(root, moves)
+    copy = getattr(args, "copy", False)
+    errs = _validate(root, moves, copy=copy)
     if errs:
         for e in errs:
             print(f"error: {e}", file=sys.stderr)
         return 1
+
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    staging, copied = None, []
+    if copy and any(not src.is_relative_to(root) for src, _ in moves):
+        staging, moves, copied = _stage_copies(root, moves, stamp)
+        errs = _validate(root, moves)
+        if errs:
+            _discard_staging(root, staging)
+            for e in errs:
+                print(f"error: {e}", file=sys.stderr)
+            return 1
+    origin = {root / c["staged"]: c["from"] for c in copied}
 
     rewrites = plan_rewrites(root, moves, prose=not args.no_prose)
     n_edits = sum(len(r["edits"]) for r in rewrites)
@@ -448,6 +516,7 @@ def cmd_apply(args) -> int:
             print(f"  ... and {len(rewrites) - 6} more file(s)")
 
     if rewrites and args.no_rewrite and not args.break_links:
+        _discard_staging(root, staging)
         print("\nerror: --no-rewrite leaves those dangling. Move whole "
               "directories to keep them, or pass --break-links to accept it.",
               file=sys.stderr)
@@ -455,10 +524,14 @@ def cmd_apply(args) -> int:
 
     if args.dry_run:
         for src, dst in moves:
-            print(f"  would move  {src.relative_to(root).as_posix()}"
-                  f"  ->  {dst.relative_to(root).as_posix()}")
+            if src in origin:
+                print(f"  would copy  {origin[src]}  ->  {dst.relative_to(root).as_posix()}")
+            else:
+                print(f"  would move  {src.relative_to(root).as_posix()}"
+                      f"  ->  {dst.relative_to(root).as_posix()}")
         print(f"\n{len(moves)} move(s), {n_edits} reference(s) "
               f"{'left to dangle' if args.no_rewrite else 'repointed'}")
+        _discard_staging(root, staging)
         return 0
 
     # A move can fail halfway — a file open in an editor is enough on Windows.
@@ -475,13 +548,15 @@ def cmd_apply(args) -> int:
             src.rename(dst)
             done.append({"from": src.relative_to(root).as_posix(),
                          "to": dst.relative_to(root).as_posix()})
-            print(f"  moved  {done[-1]['from']}  ->  {done[-1]['to']}")
+            if src in origin:
+                print(f"  copied  {origin[src]}  ->  {done[-1]['to']}")
+            else:
+                print(f"  moved  {done[-1]['from']}  ->  {done[-1]['to']}")
     except OSError as exc:
         failure = exc
         print(f"\nerror: stopped after {len(done)} of {len(moves)} move(s): {exc}",
               file=sys.stderr)
 
-    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     man_dir = root / "output" / "adopt"
     man_dir.mkdir(parents=True, exist_ok=True)
     man = man_dir / f"{stamp}.json"
@@ -493,6 +568,8 @@ def cmd_apply(args) -> int:
     if edited:
         print(f"  repointed {edited} reference(s)")
 
+    if staging is not None and not failure:
+        _discard_staging(root, staging)  # every copy has moved out of it
     # Moving everything out of `research/` leaves `research/` sitting there.
     # Nothing in this module deletes, so it is named rather than removed —
     # an empty directory nobody mentions is one the person finds later and
@@ -507,7 +584,10 @@ def cmd_apply(args) -> int:
     recorded = [] if (args.no_rewrite or failure) else rewrites
     man.write_text(json.dumps({"root": str(root), "moves": done,
                                "rewrites": recorded,
-                               "prose": not args.no_prose}, indent=2,
+                               "prose": not args.no_prose,
+                               # What came from outside the project: undoing a
+                               # copy removes it; the original never moved.
+                               "copied": copied}, indent=2,
                               ensure_ascii=False), encoding="utf-8")
     print(f"\n{len(done)} moved. Undo with: magi adopt undo "
           f"{man.relative_to(root).as_posix()}")
@@ -545,7 +625,19 @@ def cmd_undo(args) -> int:
     undone = apply_rewrites(root, data.get("rewrites", []),
                             prose=data.get("prose", True), reverse=True)
 
+    copied = {c["staged"]: c["from"] for c in data.get("copied") or []}
     for m in reversed(moves):
+        if m["from"] in copied:
+            target = root / m["to"]
+            if target.is_dir():
+                import shutil
+
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            print(f"  removed copy  {m['to']}  (the original, {copied[m['from']]}, "
+                  "was never touched)")
+            continue
         (root / m["from"]).parent.mkdir(parents=True, exist_ok=True)
         (root / m["to"]).rename(root / m["from"])
         print(f"  put back  {m['from']}")
@@ -580,6 +672,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="Repoint real links only, not paths written in prose")
     p_a.add_argument("--break-links", action="store_true",
                      help="With --no-rewrite: accept the dangling references")
+    p_a.add_argument("--copy", action="store_true",
+                     help="Bring in material from outside the project by copying it: "
+                          "the originals stay where they are, untouched, and undo "
+                          "removes the copies")
     p_a.set_defaults(func=cmd_apply)
 
     p_u = sub.add_parser("undo", help="Put back what the last apply moved")

@@ -254,6 +254,10 @@ def test_the_handover_gate_needs_both_ends_of_the_terminal(monkeypatch, capsys, 
 
     monkeypatch.setattr(_sys.stdin, "isatty", lambda: True, raising=False)
     monkeypatch.setattr(_sys.stdout, "isatty", lambda: False, raising=False)
+    # About terminals, not repositories: a temp directory can sit inside a
+    # home directory that is itself a git repository, where the gate refuses
+    # for a different reason (test_feedback_2026_09_15 covers that one).
+    monkeypatch.setattr(pm, "enclosing_repo", lambda root: None)
 
     def refuse(*_a, **_k):
         raise AssertionError("asked a question into a pipe nobody reads")

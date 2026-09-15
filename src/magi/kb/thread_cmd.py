@@ -306,8 +306,14 @@ def cmd_post(args) -> int:
             # `bet:` is — a path that appears in the frontmatter with no event
             # behind it cannot be told from one somebody typed by hand.
             note = threads.read_note(path)
-            if note.kind != vocab.PROPOSITION:
-                raise Refused(f"--evidence is for a proposition; {args.slug} is a {note.kind}")
+            # A question's computational evidence is as real as a
+            # proposition's — the enumeration that answers it is a script a
+            # reviewer can run — and refusing it left the path named only in
+            # prose, where nothing checks that it exists. A line holds no
+            # claim, so it holds no evidence.
+            if note.kind not in (vocab.PROPOSITION, vocab.QUESTION):
+                raise Refused(f"--evidence is for a proposition or a question; "
+                              f"{args.slug} is a {note.kind}")
             root = _root(args)
             merged = list(dict.fromkeys(
                 [str(item) for item in threads.as_list(note.frontmatter.get("evidence"))]
@@ -351,6 +357,36 @@ def cmd_claim(args) -> int:
                       line=args.line, via=via_name(host, getattr(args, "via", None)))
     return _report(args, {"slug": args.slug, "path": str(path), "claim": text},
                    f"{args.slug}: claim restated")
+
+
+def cmd_derivation(args) -> int:
+    """Point a proposition at where its argument lives, as a recorded change.
+
+    `derivation:` could only be set when a note was opened. When the working
+    out moved to a new draft, the only way to say so was to edit the thread's
+    frontmatter by hand — which the protocol tells an agent not to do, and
+    which leaves a change nobody signed.
+    """
+    path = _path(args, args.slug)
+    host = host_name(args.host)
+    try:
+        note = threads.read_note(path)
+    except FileNotFoundError:
+        print(f"no note at {path} — `magi thread new` opens one", file=sys.stderr)
+        return 1
+    if note.kind != vocab.PROPOSITION:
+        raise Refused(f"a derivation is a proposition's; {args.slug} is a {note.kind}")
+    root = _root(args)
+    refs = [_derivation_ref(root, item) for item in args.paths]
+    current = [str(item) for item in threads.as_list(note.frontmatter.get("derivation"))]
+    wanted = list(dict.fromkeys(refs if args.replace else current + refs))
+    if wanted == current:
+        return _report(args, {"slug": args.slug, "path": str(path), "derivation": current},
+                       f"{args.slug}: derivation unchanged")
+    threads.set_field(path, "derivation", wanted, host=host, text=args.why or "",
+                      line=args.line, via=via_name(host, getattr(args, "via", None)))
+    return _report(args, {"slug": args.slug, "path": str(path), "derivation": wanted},
+                   f"{args.slug}: derivation is now {', '.join(wanted)}")
 
 
 def _warn_if_closing_a_line(args, path) -> None:
@@ -491,6 +527,20 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("--host", help="Signature (default: $MAGI_HOST, else 'cli')")
     claim.add_argument("--via", help=via_help)
     claim.set_defaults(func=cmd_claim)
+
+    derivation = sub.add_parser("derivation", parents=[common],
+                                help="Point a proposition at where its argument lives, "
+                                     "as a recorded change")
+    derivation.add_argument("slug")
+    derivation.add_argument("paths", nargs="+", metavar="PATH",
+                            help="A [[drafts/...]] link or a path in the project")
+    derivation.add_argument("--replace", action="store_true",
+                            help="Replace the list rather than add to it")
+    derivation.add_argument("--why", help="What changed and why, if worth saying")
+    derivation.add_argument("--line")
+    derivation.add_argument("--host", help="Signature (default: $MAGI_HOST, else 'cli')")
+    derivation.add_argument("--via", help=via_help)
+    derivation.set_defaults(func=cmd_derivation)
 
     post = sub.add_parser("post", parents=[common],
                           help="Add a signed post to the discussion")

@@ -13,6 +13,7 @@ moment it is written to the log; it becomes real only at commit.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -675,6 +676,51 @@ def cmd_list(args) -> int:
 # decide
 # --------------------------------------------------------------------------
 
+def cmd_approve_all(args) -> int:
+    """Approve every undecided item that has a conversion to approve.
+
+    Seventeen papers took seventeen `--item … --decision approve` calls. The
+    listing is still where a person looks first; this is the keystroke after
+    they have. An item that failed has nothing to approve — it needs `reject`
+    (the next rung down) or `discard` — so it is named and left undecided, and
+    its batch stays held until somebody decides it.
+    """
+    topic = _resolve_topic(args.topic_dir)
+    if topic is None:
+        print("no project found (run inside one, or pass --project-dir)", file=sys.stderr)
+        return 1
+    wanted = getattr(args, "batch", None)
+    known = ledger.list_batches(topic)
+    if wanted and wanted not in known:
+        print(f"no batch {wanted!r} — 'magi ingest review' lists them", file=sys.stderr)
+        return 1
+
+    approved, flagged, left = 0, 0, []
+    for batch_id in ([wanted] if wanted else known):
+        for item in ledger.blocking_commit(ledger.load_batch(topic, batch_id)):
+            if not item.ok:
+                left.append(item)
+                continue
+            ledger.record_decision(topic, batch_id, item.item_id, "approve")
+            approved += 1
+            loud = ledger.loud_findings(item)
+            flagged += bool(loud)
+            what = item.title or item.source_value
+            print(f"{item.item_id}: approve  {str(what)[:60]}"
+                  + (f"  ({loud} flag(s))" if loud else ""))
+
+    print(f"\n{approved} approved"
+          + (f", {flagged} of them carrying flags the listing shows" if flagged else ""))
+    for item in left:
+        what = item.title or item.source_value
+        print(f"  not approved: {item.item_id} {str(what)[:50]} — it did not convert "
+              f"({str(item.error or 'failed')[:60]}); --decision reject walks it down "
+              "the ladder, discard drops it")
+    if approved and not getattr(args, "commit", False):
+        print("Then: magi ingest review --commit")
+    return 0
+
+
 def cmd_decide(args) -> int:
     topic = _resolve_topic(args.topic_dir)
     if topic is None:
@@ -807,6 +853,16 @@ def cmd_commit(args) -> int:
                       f"content — kept both, this one as {dest.name}")
             shutil.copy2(src, dest)
 
+            # What a route keeps beside the document under the document's own
+            # name — `<paper>.macros.tex` from the arXiv routes — goes with it,
+            # renamed with it if the document was. Left in staging, the
+            # definitions `magi math check` needs for this paper were lost at
+            # exactly the step that files the paper.
+            for side in sorted(src.parent.glob(glob.escape(src.stem) + ".*")):
+                if side == src or not side.is_file() or side.suffix.lower() == ".md":
+                    continue
+                shutil.copy2(side, dest.with_name(dest.stem + side.name[len(src.stem):]))
+
             staged_images = Path(src).parent / "images"
             collisions = []
             if staged_images.is_dir():
@@ -834,6 +890,10 @@ def cmd_commit(args) -> int:
                       f"({', '.join(sorted(collisions)[:5])}) — this document's "
                       "figures would have overwritten another document's")
 
+            # Said before the finalize pass, not after it: that pass formats and
+            # checks the document, and a line that appears only once it is done
+            # cannot tell a slow paper from a stuck one.
+            print(f"  filing {dest.name} — formatting and checking its maths...", flush=True)
             _finalize(
                 [sys.executable, "-m", "magi", "ingest", "finalize", "none",
                  "--topic-dir", str(topic), "--md-file", str(dest), "--skip-lint",
@@ -948,6 +1008,10 @@ def main(argv=None) -> int:
                                  "it, reset undoes")
         parser.add_argument("--commit", action="store_true",
                             help="Move everything approved into raw/")
+        parser.add_argument("--approve-all", action="store_true",
+                            help="Approve every undecided item that converted (of "
+                                 "--batch, or of every batch). An item that failed "
+                                 "is named and left for a decision of its own.")
 
     args = parser.parse_args(argv[1:])
     # Verb-specific flags are absent from the other parsers; give every handler
@@ -957,6 +1021,13 @@ def main(argv=None) -> int:
             setattr(args, name, None)
 
     if verb == "review":
+        if getattr(args, "approve_all", False):
+            if args.item or args.decision:
+                print("magi ingest review: --approve-all decides every item; "
+                      "--item/--decision decide one", file=sys.stderr)
+                return 2
+            rc = cmd_approve_all(args)
+            return cmd_commit(args) if rc == 0 and args.commit else rc
         if args.commit:
             return cmd_commit(args)
         if args.item or args.decision:

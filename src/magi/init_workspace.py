@@ -1,5 +1,19 @@
 #!/usr/bin/env python
-"""Programmatically initialize topic workspace folders and default templates.
+"""Make a folder a MAGI project, in one step.
+
+It took eight on a real machine: `magi skills install` refused without
+`--host`; `--host auto` then installed into a folder that was not a project;
+`magi init` said to run `magi install`, which installed the same skills again
+plus the hooks; `magi sync` suggested indexing an empty project and a `pm init`
+that would have committed into the enclosing repository; and the title and
+scope stayed "My Project / A research project." because nothing could set them.
+
+`magi init` now does the whole of it: the scaffold, the project's title and
+scope (asked for on a terminal, the folder's name otherwise), and — unless
+told not to — this project's skills, protocol block and hooks in every agent
+CLI on the machine. It still only adds: an existing file is left alone, an
+existing `.gitignore` gets MAGI's lines appended, and material already in the
+folder is named and pointed at `magi adopt`, never moved.
 """
 
 import os
@@ -47,6 +61,14 @@ a decision, a post on an existing note, or a task — and leaves a link back.
 
 CLAUDE_POINTER = "@AGENTS.md\n"
 
+#: What the protocol block says when nobody has said what the project is about.
+#: Reported at the end of init with the command that replaces it.
+PLACEHOLDER_SCOPE = "A research project."
+
+#: Set by the test suite: a scaffolding test must not depend on which agent
+#: CLIs the machine running it happens to have.
+NO_INSTALL_ENV = "MAGI_INIT_NO_INSTALL"
+
 
 def safe_write(p: Path, content: str, force: bool):
     if p.exists():
@@ -62,6 +84,39 @@ def safe_write(p: Path, content: str, force: bool):
         print(f"Overwriting {p} (previous contents kept at {kept})")
     p.write_text(content, encoding="utf-8")
 
+
+#: The first line of what `merge_gitignore` appends, so a person reading the
+#: file can tell their lines from MAGI's.
+GITIGNORE_MARK = "# Added by `magi init`: what magi will make again. Nothing above was changed."
+
+
+def merge_gitignore(path: Path, template: str, force: bool) -> None:
+    """Give an existing `.gitignore` MAGI's rules without replacing its own.
+
+    Skipping an existing file — what `safe_write` does — left MAGI's rules out
+    of it entirely, so `scratch/` and the databases went into the person's
+    history. Replacing it would throw away theirs. Appending the lines it does
+    not already have is the only answer that keeps both.
+    """
+    if force or not path.exists():
+        safe_write(path, template, force)
+        return
+    raw = path.read_bytes()
+    existing = raw.decode("utf-8", errors="replace")
+    have = {line.strip() for line in existing.splitlines()}
+    rules = [line for line in template.splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    missing = [rule for rule in rules if rule.strip() not in have]
+    if not missing:
+        print(f"Skipping existing {path} (it already ignores what magi rebuilds)")
+        return
+    newline = "\r\n" if b"\r\n" in raw else "\n"
+    block = newline.join(["", GITIGNORE_MARK, *missing, ""])
+    path.write_bytes((existing.rstrip("\r\n") + newline + block).encode("utf-8"))
+    print(f"Added {len(missing)} line(s) to the existing {path.name} — what magi "
+          "rebuilds; nothing already there was changed")
+
+
 def create_minimal_index(path: Path, title: str, today: str, force: bool = False):
     """Scaffold one directory's `_index.md` using the shared renderer.
 
@@ -75,20 +130,87 @@ def create_minimal_index(path: Path, title: str, today: str, force: bool = False
 
     safe_write(path, render_index(path.parent, today=today), force)
 
+
+def _material_already_here(root: Path) -> list[str]:
+    """What the folder held before init: anything that is not MAGI's own."""
+    from magi.adopt import SCAFFOLD
+
+    try:
+        return sorted(p.name + ("/" if p.is_dir() else "") for p in root.iterdir()
+                      if p.name not in SCAFFOLD and not p.name.startswith("."))
+    except OSError:
+        return []
+
+
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def _identity(args, root: Path, existing: bool) -> tuple[str, str]:
+    """The title and scope this run writes, and whether they came from a person.
+
+    A terminal is asked; anything else gets the folder's name — a real name,
+    unlike "My Project" — and a placeholder scope that the end of the run
+    names, with the command that replaces it.
+    """
+    if existing and not args.force:
+        # Init only adds. A project that already says who it is keeps saying
+        # it — `magi config set` is the command that changes that, and init
+        # names it rather than doing it quietly.
+        from magi.config_cmd import read_identity
+
+        current = read_identity(root)
+        title = current.get("title") or root.name
+        scope = current.get("scope") or PLACEHOLDER_SCOPE
+        for key, given, have in (("title", args.name, title), ("scope", args.scope, scope)):
+            if given and given != have:
+                print(f"config.md already gives the {key} as {have!r}; left as it is — "
+                      f'magi config set {key} "{given}" changes it')
+        return title, scope
+    title, scope = args.name, args.scope
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        if title is None:
+            title = _ask(f"Project title [{root.name}]: ")
+        if scope is None:
+            scope = _ask("What is it about, in one sentence? [later] ")
+    return (title or root.name), (scope or PLACEHOLDER_SCOPE)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="magi init", description="Initialize project")
+    parser = argparse.ArgumentParser(
+        prog="magi init",
+        description="Make this folder a MAGI project: the scaffold, its title and scope, "
+                    "and this project's skills, protocol block and hooks in every agent "
+                    "CLI found on the machine. Adds files; replaces none.")
     parser.add_argument("--project-dir", "--topic-dir", dest="topic_dir", default=".", help="Project directory path (default: current directory)")
-    parser.add_argument("--name", default="My Project", help="Project name/title")
-    parser.add_argument("--scope", default="A research project.", help="Project scope description")
+    parser.add_argument("--title", "--name", dest="name", default=None,
+                        help="Project title (default: asked on a terminal, otherwise the folder's name)")
+    parser.add_argument("--scope", default=None,
+                        help="What the project is about, in one sentence (default: asked on a terminal)")
     parser.add_argument("--coaching", default="light",
                         choices=["off", "light", "strict"],
                         help="How hard the project asks its human for a prediction. "
                              "strict refuses to start a derivation without one.")
+    parser.add_argument("--host", action="append", default=[],
+                        help="Install into this agent CLI only (repeatable; default: every one found)")
+    parser.add_argument("--no-install", action="store_true",
+                        help="Scaffold only; `magi install` does the rest later")
     parser.add_argument("--force", action="store_true", help="Overwrite existing config/log/index files")
     args = parser.parse_args(argv)
 
     topic_path = Path(args.topic_dir).resolve()
+    topic_path.mkdir(parents=True, exist_ok=True)
     today = date.today().isoformat()
+
+    # Looked at before anything is written, so "already here" means the
+    # person's material and not the scaffold this run is about to add.
+    already_here = _material_already_here(topic_path)
+    existing_config = (topic_path / "config.md").is_file()
+    title, scope = _identity(args, topic_path, existing_config)
 
     # 1. Folders to create
     subdirs = [
@@ -96,7 +218,9 @@ def main(argv=None):
         "raw/articles",
         "raw/papers",
         "raw/repos",
-        "raw/notes",
+        # No raw/notes. A folder by that name beside the sources invited a
+        # person's own notes into the one tree nobody works on again; theirs
+        # belong in drafts/ or inbox/notes.md.
         "raw/data",
         "wiki",
         "wiki/concepts",
@@ -124,16 +248,16 @@ def main(argv=None):
 
     # 2. config.md
     config_content = f"""---
-title: "{args.name}"
-scope: "{args.scope}"
+title: "{title}"
+scope: "{scope}"
 created: {today}
 ---
 
-# {args.name}
+# {title}
 
 ## Scope
 
-{args.scope}
+{scope}
 
 ## Conventions
 
@@ -148,7 +272,7 @@ created: {today}
     #    it any more, and nothing reads it either.
 
     # 4. Root _index.md
-    root_index_content = f"""# {args.name}
+    root_index_content = f"""# {title}
 
 > Topic wiki initialized on {today}.
 
@@ -158,7 +282,7 @@ created: {today}
 |-----------|---------|
 | [raw/](raw/) | Raw source materials |
 | [wiki/](wiki/) | Compiled knowledge base |
-| [output/](output/) | Generated artifacts — except `output/ingest/`, `output/radar/`, `output/reflect/`, `output/adopt/` and `output/llm-ledger.jsonl`, which record decisions you made, what they cost, or how to undo a move, and cannot be rebuilt |
+| [output/](output/) | Generated artifacts — except `output/ingest/`, `output/radar/`, `output/reflect/`, `output/adopt/`, `output/tidy/` and `output/llm-ledger.jsonl`, which record decisions you made, what they cost, or how to undo a change, and cannot be rebuilt |
 | [inbox/](inbox/) | Pending ingestion |
 
 ## Statistics
@@ -175,7 +299,6 @@ created: {today}
         ("raw/articles", "Articles"),
         ("raw/papers", "Papers"),
         ("raw/repos", "Repos"),
-        ("raw/notes", "Notes"),
         ("raw/data", "Data"),
         ("wiki", "Wiki"),
         ("wiki/concepts", "Concepts"),
@@ -184,9 +307,9 @@ created: {today}
         ("output", "Output"),
     ]
 
-    for rel_path, title in dir_titles:
+    for rel_path, dir_title in dir_titles:
         p = topic_path / rel_path / "_index.md"
-        create_minimal_index(p, title, today, args.force)
+        create_minimal_index(p, dir_title, today, args.force)
 
     # 5b. The human's two surfaces. `decisions.md` is the only file MAGI
     # never writes on its own initiative — an agent transcribes what a person
@@ -200,7 +323,7 @@ created: {today}
     # The protocol is one text, in `core/managed.py`, because it is read at
     # the start of every session on every host — and because `magi install`
     # has to be able to rewrite it in place when it changes.
-    protocol = managed.body(args.name, args.scope, args.coaching)
+    protocol = managed.body(title, scope, args.coaching)
     # The protocol goes in a marked block so upgrades can rewrite it without
     # touching what a person added around it. CLAUDE.md holds one line so
     # there is a single text to keep current, not two that drift.
@@ -241,6 +364,8 @@ research:
 ollama:
   base_url: "http://127.0.0.1:11434"
   autostart: true      # start a stopped local Ollama on demand
+  keep_alive: release  # release = unload the model when the magi command ends;
+                       # a duration ("30m") keeps it warm between commands, -1 forever
   embed_batch: 16      # chunks per embedding request; raise on a roomy machine
 models:
   ocr: "glm-ocr:q8_0"
@@ -255,6 +380,9 @@ ocr:
   use_mineru: false
   timeout: 180
   dpi: 150
+math:
+  preamble: []         # lines `magi math check` adds to its LaTeX preamble, for a
+                       # package or macro the whole library uses: ['\\usepackage{braket}']
 semantic_link:
   threshold: 0.75
   merge_threshold: 0.85
@@ -320,6 +448,7 @@ output/fanout.jsonl
 #   output/ingest/           what was queued, converted, decided and committed
 #   output/radar/            which candidates you already said no to
 #   output/reflect/          what the slow loop noticed, and what you did about it
+#   output/tidy/             what each `magi math repair`/`format` run changed — the undo
 #   output/llm-ledger.jsonl  what MAGI's own model calls cost you this week
 # None of it can be regenerated — a re-run returns a different world, and the
 # transcripts the slow loop read have rotated away — so they are tracked
@@ -334,7 +463,7 @@ inbox/.processed/
 .DS_Store
 Thumbs.db
 """
-    safe_write(topic_path / ".gitignore", gitignore, args.force)
+    merge_gitignore(topic_path / ".gitignore", gitignore, args.force)
 
     print(f"Project initialized at: {topic_path}")
 
@@ -363,13 +492,49 @@ Thumbs.db
     # still matters is `register_kb` above: it is what `magi kb list` and the
     # WebUI picker read, and it has already run.
 
-    # `magi install`, not `magi skills install`. The narrower one installs
-    # skills and asks which host; this one does skills, the AGENTS.md protocol
-    # block and all three hooks without prompting, and is the one `magi --help`
-    # lists. Sending a first-timer to the sibling is how somebody ends up with
-    # skills and no end-of-session gate.
-    print("Next: cd into it, then 'magi install' to give your agent CLI "
-          "this project's skills, and 'magi sync' to see what to do first.")
+    # 9. The agent CLIs. `magi install`, not `magi skills install`: the narrow
+    #    one installs skills and asks which host; this one does skills, the
+    #    AGENTS.md block and all three hooks for every CLI it finds. Sending a
+    #    first-timer off to run it — which is what init used to end with — is
+    #    how somebody ends up with skills and no end-of-session gate.
+    if args.no_install or os.environ.get(NO_INSTALL_ENV):
+        installed = None
+    else:
+        from magi import install_cmd
+
+        install_argv = ["--project-dir", str(topic_path)]
+        for host in args.host:
+            install_argv += ["--host", host]
+        print("\nInstalling this project into the agent CLIs found here "
+              "(skills, protocol block, hooks):")
+        installed = install_cmd.main(install_argv) == 0
+        if not installed:
+            print("  not installed — once an agent CLI is set up: magi install")
+
+    # 10. What was there before, and where the folder sits.
+    if already_here:
+        shown = ", ".join(already_here[:5]) + (", …" if len(already_here) > 5 else "")
+        print(f"\nThis folder already held {len(already_here)} item(s) ({shown}); "
+              "none of them was touched.")
+        print("  To bring them into the project: magi adopt survey .")
+    try:
+        from magi.pm import enclosing_repo
+
+        outer = enclosing_repo(topic_path)
+    except Exception:  # noqa: BLE001 — a note, never a failure
+        outer = None
+    if outer is not None:
+        print(f"\nThis project is a folder inside the git repository at {outer}: "
+              "its files are that repository's to commit, and `magi pm init` "
+              "would commit into it.")
+
+    print("\nNext:")
+    if installed is None and not os.environ.get(NO_INSTALL_ENV):
+        print("  magi install                              # skills, protocol block, hooks")
+    if scope == PLACEHOLDER_SCOPE:
+        print('  magi config set scope "<one sentence>"    # the protocol block still says a placeholder')
+    print("  magi ingest url <arXiv id, DOI or link>   # bring in sources")
+    print("  magi next                                 # from here on, it says what to do")
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -279,6 +279,20 @@ def act_on_task(workspace: Path, task_id: str, action: str) -> tuple[bool, str]:
     return True, (proc.stdout or "").strip()[-300:]
 
 
+def enclosing_repo(root: Path) -> Path | None:
+    """The git repository *root* sits inside, when that is not *root* itself.
+
+    Walks up for `.git` rather than asking git: a folder nobody has made a
+    repository costs no subprocess, and `.git` as a file (a worktree, a
+    submodule) counts the same as the directory.
+    """
+    root = Path(root).resolve()
+    for candidate in (root, *root.parents):
+        if (candidate / ".git").exists():
+            return None if candidate == root else candidate
+    return None
+
+
 def _agreed_to_hand_over(root: Path, assumed_yes: bool) -> bool:
     """Say what `bd init` will do to this directory, and on a terminal, ask.
 
@@ -291,12 +305,25 @@ def _agreed_to_hand_over(root: Path, assumed_yes: bool) -> bool:
     continues, which is the same information at the only moment it can still
     be acted on.
     """
+    outer = enclosing_repo(root)
     print(f"'magi pm init' hands {root} to bd (Beads), another program. It will:")
     print("  - create .beads/ and a task database")
-    print("  - run 'git init' here if this is not a repository yet")
-    print("  - commit the files it created, authored by your own git identity")
+    if outer is not None:
+        print(f"  - commit the files it created — and this project is a folder inside the "
+              f"git repository at {outer}, so that commit lands in that repository's "
+              f"history, authored by your own git identity")
+    else:
+        print("  - run 'git init' here if this is not a repository yet")
+        print("  - commit the files it created, authored by your own git identity")
     print("  - install its own agent hook files (.claude/, AGENTS.md)")
     print("Task tracking is optional in MAGI — nothing else needs it.")
+    if outer is not None and not assumed_yes and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # Without a person to ask, going ahead is the default below — and a
+        # commit into a repository the project merely sits inside is not a
+        # default anyone chose. It takes --yes, said by whoever means it.
+        print(f"nothing was handed over: {root} is inside {outer}. Pass --yes if a "
+              "commit into that repository is what you want.")
+        return False
     # `isatty` is not "is there a person who can answer": a server started
     # from a terminal hands its own tty to every child it spawns, so a WebUI
     # job answered True here and then hung on `input()`. It is still the right

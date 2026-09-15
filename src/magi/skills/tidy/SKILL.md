@@ -13,12 +13,12 @@ origin: magi
 two concept cards are about the same thing.
 
 ## Method
-**Maths.** `magi math format` first — it fixes mechanically what it can, free.
-Then `magi math check --json` for what is left. Work one file at a time: fix
-the *first* entry, re-check, and watch the rest of that file's errors vanish —
-one unclosed `$$` swallows everything after it and reports as many errors.
-`likely-macro` is usually a false positive; check the source with
-`magi ingest crop <pdf>` before touching it.
+**Maths.** Mechanical first, each run undoable with `magi math undo`: for arXiv-HTML papers `magi math repair --dry-run`
+then `magi math repair`; then `magi math format --dry-run` and `magi math format`. Then `magi math check --json`:
+fix one file's *first* entry and re-check — one unclosed `$$` reports as many errors as it swallows.
+`likely-macro` is a package or the author's macro, not a typo: define it in `math.preamble` or `<paper>.macros.tex`,
+never in the formula; check the PDF first (`magi ingest crop <pdf>`). A figure inside a formula becomes
+`\text{[omitted: <what it was>]}` — that shape exactly.
 
 **Tags.** `magi tags extract .`, read the counts, and write the mapping that
 collapses synonyms, acronyms and plurals into one tag. Show it to the human

@@ -21,6 +21,12 @@ measured on real submissions:
 and it does not silently lose figures the way the tarball route can (arXiv
 2401.00506: six referenced, zero survived, run reported success).
 
+What it does lose is the *layout* around each formula — LaTeXML sets
+equations as tables and pandoc writes those back as Markdown tables — and the
+author's own macros, which the TeX keeps verbatim. `latexml_math` repairs the
+first and `tex_macros` recovers the second from the e-print, which is why this
+route fetches the source too: not to convert it, only to read its definitions.
+
 Coverage, measured: 8/10 recent papers on the native endpoint; 14/15 on ar5iv
 for the pre-2023 range that dominates an older physics library. Papers that
 miss on both are a real outcome, not an era artifact — fall through to the
@@ -341,8 +347,15 @@ def _regroup_align_tables(md: str) -> tuple[str, int]:
 
 
 def convert(arxiv_id: str, output_dir, *, doc_type: str | None = None,
-            fetch_figures: bool = True) -> ConversionResult:
-    """Fetch a paper's arXiv HTML and write it into ``output_dir`` as Markdown."""
+            fetch_figures: bool = True, fetch_source: bool = True) -> ConversionResult:
+    """Fetch a paper's arXiv HTML and write it into ``output_dir`` as Markdown.
+
+    *fetch_source* also reads the paper's e-print for the author's macro
+    definitions — one more request to arXiv, nothing converted from it.
+    """
+    from magi.ingest import latexml_math, tex_macros
+    from magi.kb.validate_math_latex import MACROS_SUFFIX
+
     ident = normalize_arxiv_id(arxiv_id)
     if not ident:
         return ConversionResult.failed(f"'{arxiv_id}' is not an arXiv identifier.")
@@ -350,13 +363,13 @@ def convert(arxiv_id: str, output_dir, *, doc_type: str | None = None,
     output_dir = os.path.abspath(str(output_dir))
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Fetching arXiv HTML for {ident}...")
+    print(f"Fetching arXiv HTML for {ident}...", flush=True)
     got = fetch(ident)
     if not got.ok:
         print(f"No arXiv HTML rendering available: {got.reason}")
         return ConversionResult.failed(
             f"No arXiv HTML rendering for {ident}: {got.reason}")
-    print(f"Got a rendering from {got.endpoint} ({len(got.body)} bytes)")
+    print(f"Got a rendering from {got.endpoint} ({len(got.body)} bytes)", flush=True)
 
     page = got.body.decode("utf-8", errors="replace")
     formulas = extract_tex_formulas(page)
@@ -378,12 +391,18 @@ def convert(arxiv_id: str, output_dir, *, doc_type: str | None = None,
         md_content = Path(out_md).read_text(encoding="utf-8", errors="replace")
 
     md_content, n_figs, fig_map = _rewrite_image_paths(md_content, ident)
+
+    macros, math_packages, source_why = {}, [], None
+    if fetch_source:
+        print("Fetching the LaTeX source for the author's macro definitions...", flush=True)
+        macros, math_packages, source_why = tex_macros.from_eprint(ident)
+    md_content, repairs, left = latexml_math.normalize(md_content, macros=macros)
     md_content, n_regrouped = _regroup_align_tables(md_content)
 
     images_dir = os.path.join(output_dir, "images")
     n_figs_ok, fig_failures = 0, []
     if fetch_figures and fig_map:
-        print(f"Fetching {len(fig_map)} figure(s)...")
+        print(f"Fetching {len(fig_map)} figure(s)...", flush=True)
         n_figs_ok, fig_failures = download_figures(fig_map, got.url, images_dir)
         print(f"Figures: {n_figs_ok} saved into images/, {len(fig_failures)} failed")
 
@@ -410,6 +429,16 @@ def convert(arxiv_id: str, output_dir, *, doc_type: str | None = None,
     atomic_write(output_path, frontmatter + "\n" + md_content, encoding="utf-8")
     print(f"Successfully converted and saved to {output_path}")
 
+    # What `magi math check` needs to compile this paper that is not in the
+    # document itself: definitions no formula could have expanded in place,
+    # and the maths packages the paper loads.
+    leftover = tex_macros.used_in_math(md_content, macros)
+    sidecar = None
+    if leftover or math_packages:
+        sidecar = Path(output_path).with_name(Path(output_path).stem + MACROS_SUFFIX)
+        atomic_write(sidecar, tex_macros.sidecar_text(
+            leftover, math_packages, origin=f"the arXiv:{ident} e-print"), encoding="utf-8")
+
     outcome = ConversionResult(
         success=True,
         markdown_path=str(output_path),
@@ -418,6 +447,27 @@ def convert(arxiv_id: str, output_dir, *, doc_type: str | None = None,
     outcome.flag("route-arxiv-html",
                  f"{len(formulas)} formula(s) carried verbatim TeX from {got.endpoint}",
                  severity="info")
+    # Line numbers in the document as written, frontmatter included.
+    offset = frontmatter.count("\n") + 1
+    if repairs:
+        outcome.flag("math-layout-repaired",
+                     f"{len(repairs)} repair(s) to what LaTeXML and pandoc did to the "
+                     f"formulas: {latexml_math.describe(repairs)}", severity="info")
+    if left:
+        first = min(item.line for item in left) + offset
+        outcome.flag("math-layout-left",
+                     f"{len(left)} formula layout(s) could not be repaired mechanically "
+                     f"({latexml_math.describe(left)}; first at line {first}) — each was "
+                     "left exactly as converted; compare with the PDF")
+    if fetch_source and source_why:
+        outcome.flag("author-macros-unavailable",
+                     f"{source_why}; the author's own macros stay as written",
+                     severity="info")
+    elif sidecar is not None:
+        outcome.flag("author-macros-kept",
+                     f"{len(leftover)} author definition(s) and {len(math_packages)} maths "
+                     f"package(s) recorded in {sidecar.name} for `magi math check`",
+                     severity="info")
     if n_regrouped:
         outcome.flag("align-regrouped",
                      f"{n_regrouped} multi-line equation group(s) restored to "
@@ -450,10 +500,14 @@ def main(argv=None):
                         help="Skip figure downloads. Faster, but the figure links "
                              "in the output will be broken (arXiv asks for 15s "
                              "between requests, so figures dominate the wall time).")
+    parser.add_argument("--no-source", action="store_true",
+                        help="Do not read the paper's LaTeX source for the author's "
+                             "macros (saves one request; macros then stay as written).")
     args = parser.parse_args(argv)
 
     result = convert(args.arxiv_id, args.output_dir,
-                     fetch_figures=not args.no_figures)
+                     fetch_figures=not args.no_figures,
+                     fetch_source=not args.no_source)
     for finding in result.findings:
         print(f"  {finding}")
     return 0 if result.success else 1

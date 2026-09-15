@@ -1024,24 +1024,41 @@ def candidates(state: State, now=None) -> list:
     for view in state.lines:
         if view.slug in spoken_for or view.status in ("closed", "dormant"):
             continue
-        oldest = _oldest_open(state.notes, view.slug)
-        if oldest is None:
+        owned = _open_on_line(state.notes, view.slug)
+        if not owned:
             continue
+        oldest = min(owned, key=_waiting_since)
         waiting = _waiting_since(oldest)
         since = waiting.date().isoformat()
-        # Two sentences for one fact. Under the threshold this is the oldest
-        # open work and nothing more; past it, the router says what it wants.
-        # A proposition opened this week is not being chased.
+        # Two sentences for one fact. Under the threshold this is open work
+        # and nothing more; past it, the router says what it wants. A
+        # proposition opened this week is not being chased.
+        #
+        # "The oldest open work here (testing since <today>)" was said of a
+        # note opened minutes earlier, alone on its line: true as a ranking,
+        # and read as a complaint. The sentence now says what it knows —
+        # how many there are, and "today" when it is today.
+        when = f"since {since}" + (", today" if waiting.date() == now.date() else "")
         if (now - waiting).days >= patience:
             why = (f"{oldest.slug} has been {oldest.status} since {since} — "
                    f"post what you found, or move it")
+        elif len(owned) == 1:
+            why = f"{oldest.slug} is the open work on this line ({oldest.status} {when})"
         else:
-            why = (f"{oldest.slug} is the oldest open work here "
-                   f"({oldest.status} since {since})")
+            why = (f"{oldest.slug} is the longest-open of {len(owned)} open propositions "
+                   f"here ({oldest.status} {when})")
         actions.append(Action(
             key="work", slug=oldest.slug, line=view.slug, cost="llm", why=why,
             run=f"magi thread status {oldest.slug} <status> --text '<what happened>'"))
     return actions
+
+
+def _open_on_line(notes, line: str) -> list:
+    """The open propositions on this line."""
+    return [note for note in notes
+            if note.kind == vocab.PROPOSITION
+            and note.status in _OPEN_STATUSES
+            and line in (note.lines or [UNLINED])]
 
 
 def _oldest_open(notes, line: str):
@@ -1051,10 +1068,7 @@ def _oldest_open(notes, line: str):
     a router that lists the whole project, and then the ranking it was for
     stops meaning anything.
     """
-    owned = [note for note in notes
-             if note.kind == vocab.PROPOSITION
-             and note.status in _OPEN_STATUSES
-             and line in (note.lines or [UNLINED])]
+    owned = _open_on_line(notes, line)
     if not owned:
         return None
     # Same clock as the sentence this ranking feeds: a note with no posts

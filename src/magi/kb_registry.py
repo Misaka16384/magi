@@ -229,6 +229,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             "enabled": bool(entry.get("enabled", False)),
             "indexed": idx.is_file(),
             "exists": p.is_dir(),
+            "temporary": _under_temp(p),
             "current": current is not None and p.resolve() == current.resolve(),
         })
     if args.json:
@@ -244,6 +245,8 @@ def cmd_list(args: argparse.Namespace) -> int:
             flags.append("MISSING")
         elif not r["indexed"]:
             flags.append("no index — run 'magi index' there")
+        if r["temporary"] and r["exists"]:
+            flags.append("under the temp directory — `magi kb prune --temp` drops these")
         if r["current"]:
             flags.append("current")
         print(f"  {r['name']:<24} {r['path']}  [{', '.join(flags)}]")
@@ -266,6 +269,37 @@ def _missing(kbs: dict) -> list:
                   if not Path(entry["path"]).is_dir())
 
 
+def _under_temp(path: Path) -> bool:
+    """Is this inside the system temp directory — a test's, or an agent's scratch?"""
+    import tempfile
+
+    try:
+        return Path(path).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _prunable(kbs: dict, *, temp: bool = False, disabled: bool = False) -> list:
+    """Missing projects always; living ones only on a rule a person named.
+
+    A rule that read the path or the enabled flag by itself would delete the
+    registration of the one workspace a person was in the middle of, which is
+    why neither is a default — and why the project this was run from is never
+    on the list, whatever the rules say.
+    """
+    names = set(_missing(kbs))
+    current = find_workspace_root()
+    for name, entry in kbs.items():
+        path = Path(entry["path"])
+        if current is not None and path.is_dir() and path.resolve() == current.resolve():
+            continue
+        if temp and _under_temp(path):
+            names.add(name)
+        if disabled and not entry.get("enabled", False):
+            names.add(name)
+    return sorted(names)
+
+
 def cmd_prune(args: argparse.Namespace) -> int:
     """Drop registrations whose project directory is gone.
 
@@ -274,24 +308,34 @@ def cmd_prune(args: argparse.Namespace) -> int:
     filesystem; a KB under a temp directory that still exists is somebody's
     work until they say so themselves.
     """
+    temp, disabled = getattr(args, "temp", False), getattr(args, "disabled", False)
     if args.dry_run:
         kbs = load_registry()["kbs"]
-        dead = _missing(kbs)
+        dead = _prunable(kbs, temp=temp, disabled=disabled)
         for name in dead:
             print(f"  would unregister {name} -> {kbs[name]['path']}")
-        print(f"{len(dead)} of {len(kbs)} point at a directory that is gone")
+        if temp or disabled:
+            print(f"{len(dead)} of {len(kbs)} are gone"
+                  + (", under the temp directory" if temp else "")
+                  + (", or disabled" if disabled else ""))
+        else:
+            print(f"{len(dead)} of {len(kbs)} point at a directory that is gone")
         return 0
 
     with edit_registry() as data:
-        dead = _missing(data["kbs"])
+        dead = _prunable(data["kbs"], temp=temp, disabled=disabled)
         for name in dead:
             del data["kbs"][name]
         remaining = len(data["kbs"])
     if not dead:
         print("nothing to prune — every registered project is still there")
         return 0
-    print(f"unregistered {len(dead)} missing project(s), {remaining} remain "
-          f"(no files were deleted — they were already gone)")
+    if temp or disabled:
+        print(f"unregistered {len(dead)} project(s), {remaining} remain "
+              f"(registrations only — no files were touched)")
+    else:
+        print(f"unregistered {len(dead)} missing project(s), {remaining} remain "
+              f"(no files were deleted — they were already gone)")
     return 0
 
 
@@ -335,6 +379,11 @@ def main(argv: list[str] | None = None) -> int:
     p_pr = sub.add_parser("prune", help="Drop registrations whose project directory is gone")
     p_pr.add_argument("--dry-run", action="store_true",
                       help="Say what would go; change nothing")
+    p_pr.add_argument("--temp", action="store_true",
+                      help="Also drop projects that live under the system temp directory "
+                           "(tests, agents' scratch). Registrations only; no files are touched")
+    p_pr.add_argument("--disabled", action="store_true",
+                      help="Also drop projects that are registered but disabled")
     p_pr.set_defaults(func=cmd_prune)
 
     args = parser.parse_args(argv)

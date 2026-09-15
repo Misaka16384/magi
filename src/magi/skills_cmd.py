@@ -275,25 +275,37 @@ def target_dir(target: Drop, scope: str, project_root: Optional[Path] = None) ->
     return hosts.expand(target.project_dir, root=workspace_anchor(project_root))
 
 
+def _classify(path: Path, text: str, force: bool) -> str:
+    """What writing *text* to *path* would do: created | updated | unchanged | skipped.
+
+    One function for the real run and for `--dry-run`. The dry run used to
+    decide by existence alone, so twelve files already identical to what it
+    would write were announced as "12 updated" — and the run that followed
+    said "12 already current".
+    """
+    if not path.exists():
+        return "created"
+    try:
+        current = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        current = None
+    if current == text:
+        return "unchanged"
+    if not force and current is not None and ORIGIN_MARK not in current:
+        # Not a file MAGI wrote — somebody else's, or a fork of ours they
+        # have since made their own. A fork necessarily still mentions
+        # "magi", which is why the mark and not the word decides.
+        return "skipped"
+    return "updated"
+
+
 def _write(path: Path, text: str, force: bool) -> str:
     """Returns one of: created | updated | unchanged | skipped."""
-    if path.exists():
-        try:
-            current = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            current = None
-        if current == text:
-            return "unchanged"
-        if not force and current is not None and ORIGIN_MARK not in current:
-            # Not a file MAGI wrote — somebody else's, or a fork of ours they
-            # have since made their own. A fork necessarily still mentions
-            # "magi", which is why the mark and not the word decides.
-            return "skipped"
+    key = _classify(path, text, force)
+    if key in ("created", "updated"):
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8", newline="\n")
-        return "updated"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", newline="\n")
-    return "created"
+    return key
 
 
 def install_host(host: Host, skills: List[Skill], scope: str, force: bool,
@@ -313,10 +325,7 @@ def install_host(host: Host, skills: List[Skill], scope: str, force: bool,
         sub = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0}
         for sk in skills:
             for path, text in files_for(sk, target, dest):
-                if dry_run:
-                    key = "updated" if path.exists() else "created"
-                else:
-                    key = _write(path, text, force)
+                key = _classify(path, text, force) if dry_run else _write(path, text, force)
                 sub[key] += 1
                 counts[key] += 1
                 if key in ("created", "updated"):
@@ -626,10 +635,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "      'magi skills install' (project scope) is usually what you want.\n")
         else:
             anchor = workspace_anchor()
-            if not _is_workspace(anchor):
-                print(f"note: {anchor} is not a MAGI project — installing here anyway.\n"
-                      f"      Run this inside a project (magi init) or its hub for\n"
-                      f"      the skills to have something to work on.\n")
+            if not _is_workspace(anchor) and getattr(args, "project_root", None) is None:
+                # "Installing here anyway" put a copy of every skill into a
+                # folder that was not a project — which `magi init` in the
+                # same folder then installed a second time. Nothing here has
+                # anything for a skill to work on yet; `magi init` makes the
+                # project and installs into every agent CLI it finds.
+                print(f"error: {anchor} is not a MAGI project. `magi init` makes one "
+                      f"here and installs the skills with it; --dir <path> puts "
+                      f"them somewhere specific.")
+                return 1
 
     # Which workspace this install belongs to. `--project-root` so a caller
     # that already knows (`magi install --topic-dir X`) does not have to hope

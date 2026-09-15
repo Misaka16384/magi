@@ -380,6 +380,13 @@ class Embedder:
             self.batch = max(1, int(cfg_get(cfg, "ollama.embed_batch", EMBED_BATCH)))
         except (TypeError, ValueError):
             self.batch = EMBED_BATCH
+        # `ollama.keep_alive`: by default the model is unloaded when this
+        # process ends rather than five minutes later — see
+        # `magi.core.ollama.keep_alive_policy`.
+        from magi.core import ollama as _ollama
+
+        self._keep_alive, self._release_at_exit = _ollama.keep_alive_policy(
+            cfg_get(cfg, "ollama.keep_alive", _ollama.RELEASE))
 
     def _preflight(self) -> bool:
         """Wake a stopped Ollama, and speak up only when a human is needed.
@@ -514,6 +521,27 @@ class Embedder:
         self._preflighted = False
         return self._preflight()
 
+    def _ollama_body(self, body: dict) -> dict:
+        """A request body carrying `keep_alive` when one is configured."""
+        keep_alive = getattr(self, "_keep_alive", None)
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+        return body
+
+    def _used_ollama(self) -> None:
+        """Arrange for the model to be unloaded when this process ends.
+
+        Only after a request to it succeeded — a command that never embedded
+        must not unload a model some other program loaded — and only on a
+        local server: a remote one is somebody's shared service.
+        """
+        if not getattr(self, "_release_at_exit", False) or self.provider != "ollama":
+            return
+        from magi.core import ollama as _ollama
+
+        if _ollama.is_local(self.base_url):
+            _ollama.release_at_exit(self.base_url, self.model)
+
     def _post_batch(self, payload: list[str],
                     timeout: float | None = None) -> list[list[float]]:
         """One round trip for the whole batch. Raises; never returns None."""
@@ -551,7 +579,7 @@ class Embedder:
             try:
                 resp = self._http().post(
                     f"{self.base_url}/api/embed",
-                    json={"model": self.model, "input": payload},
+                    json=self._ollama_body({"model": self.model, "input": payload}),
                     timeout=timeout,
                 )
             except Exception as exc:
@@ -563,6 +591,7 @@ class Embedder:
                     raise ValueError("short or empty embedding batch")
                 self._batch_api = True
                 self.available = True
+                self._used_ollama()
                 return vecs
             # Ollama predates /api/embed; use the single-prompt route from
             # here on rather than probing again on every batch.
@@ -573,7 +602,7 @@ class Embedder:
             try:
                 resp = self._http().post(
                     f"{self.base_url}/api/embeddings",
-                    json={"model": self.model, "prompt": text},
+                    json=self._ollama_body({"model": self.model, "prompt": text}),
                     timeout=timeout,
                 )
             except Exception as exc:
@@ -584,6 +613,7 @@ class Embedder:
                 raise ValueError("empty embedding")
             out.append(vec)
         self.available = True
+        self._used_ollama()
         return out
 
 
@@ -741,6 +771,20 @@ def _chunk(text: str) -> list[tuple[str, int, int, str]]:
     return chunks
 
 
+def _eta(done: int, total: int, elapsed: float) -> str:
+    """`, about 12 min left` — once enough of the run is behind to extrapolate.
+
+    A 47-minute index of 17 papers printed counts and nothing else: enough to
+    tell working from wedged, nothing about whether to wait for it.
+    """
+    if done <= 0 or total <= done or elapsed < 10:
+        return ""
+    left = elapsed * (total - done) / done
+    if left < 90:
+        return f", about {max(1, round(left))} s left"
+    return f", about {round(left / 60)} min left"
+
+
 class _Progress:
     """Throttled progress lines for a command that can run for minutes.
 
@@ -843,9 +887,15 @@ def cmd_index(args: argparse.Namespace) -> int:
             )
             embedded += len(vecs)
             pending.clear()
-            progress.tick(f"embedding: {embedded} chunks vectorized", force=final)
+            progress.tick(f"embedding: {embedded} chunks vectorized · file {position}/"
+                          f"{len(corpus)}" + _eta(position, len(corpus), time.monotonic() - began),
+                          force=final)
 
-        for p in _iter_corpus(root):
+        # A list, not the generator: the count is what turns a progress line
+        # into an estimate.
+        corpus = list(_iter_corpus(root))
+        began = time.monotonic()
+        for position, p in enumerate(corpus, 1):
             rel = p.relative_to(root).as_posix()
             seen.add(rel)
             try:
@@ -912,6 +962,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             if missing:
                 progress.start(f"backfilling vectors for {len(missing)} chunks")
             done = 0
+            backfill_began = time.monotonic()
             for start in range(0, len(missing), embedder.batch):
                 batch = missing[start:start + embedder.batch]
                 vecs = embedder.embed_many([body for _, body in batch])
@@ -924,7 +975,8 @@ def cmd_index(args: argparse.Namespace) -> int:
                 conn.commit()       # survive a Ctrl-C with the work done so far
                 embedded += len(vecs)
                 done += len(vecs)
-                progress.tick(f"backfill: {done}/{len(missing)} chunks",
+                progress.tick(f"backfill: {done}/{len(missing)} chunks"
+                              + _eta(done, len(missing), time.monotonic() - backfill_began),
                               force=done == len(missing))
             conn.commit()
 

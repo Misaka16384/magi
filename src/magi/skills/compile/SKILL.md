@@ -37,3 +37,4 @@ one card at a time.
   them to the human once, when the batch reports back.
 - Cards are compiled, not authored: to change one, change the source and
   recompile.
+- `\text{[omitted: …]}` in a formula is a figure the conversion removed: never quote it as the author's words.

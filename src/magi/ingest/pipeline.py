@@ -122,8 +122,14 @@ def main(argv=None):
         if not run_cmd([sys.executable, "-m", "magi", "math", "format", target_path]):
             print("Warning: 'magi math format' failed, continuing...", file=sys.stderr)
 
-        if not run_cmd([sys.executable, "-m", "magi", "math", "check", target_path]):
-            print("Warning: 'magi math check' failed or found errors, continuing...", file=sys.stderr)
+        # Structural checks only. The pdflatex pass runs once per file for
+        # minutes on a real paper, and here it ran synchronously inside
+        # `ingest review --commit` — which is how one looping formula held a
+        # commit for twenty minutes. The full pass is a command a person runs
+        # when they want it, not a step of filing a document.
+        if not run_cmd([sys.executable, "-m", "magi", "math", "check", "--fast", target_path]):
+            print("Warning: 'magi math check --fast' found errors, continuing... "
+                  f"(the full pdflatex pass: magi math check {target_path})", file=sys.stderr)
 
     if not args.skip_lint:
         # 3. Lint / Index update
