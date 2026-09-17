@@ -66,6 +66,32 @@ another vendor. **A host's own clock is part of this table now**: before this
 release `agy` stopped at its own five-minute default while MAGI waited ten, and
 the smoke never caught it because a smoke claim answers in about a minute.
 
+**v2.8.0 (2026-09-17):** the reviewer now runs inside a Job Object
+(`core/proc.run_contained`), so every real call was re-made through it. The three
+dry-runs named the strong tier and the fallback order as before. Two real calls on
+a claim written "for every h > 0" over a derivation that fixes h = 1, each with
+`--no-fallback`: `agy -p` (`gemini-3.8-flash-high`), 38 s, `restate`, citing
+`threads/p-all-h.md` line 6 against `drafts/index-h1.md` lines 3–5 and running
+`tools/index_h1.py` under `Checked:`; `claude -p` (`opus`, effort high), 21 s,
+`refuted` — it also caught that the smoke's own derivation line is false
+(`trace(P^L)/3·3` takes only the values 3 and 0; L = 4 is a counterexample) and that
+the evidence script prints the claim instead of checking it. `restate` → `testing`,
+`refuted` → `disputed`; both ledger rows carry `tier`; `magi next` put the dispute
+first; `sync --close` wrote the MAP. Codex was dry-run only (its quota had run out
+earlier the same day), but a bare `codex exec` through the container answered.
+
+**Cutting this release found a hang the suite could not:** `codex exec` reads stdin
+whenever it is not a terminal, and a reviewer launched from an agent's shell
+inherited a pipe nobody closes — the call sat to its timeout. The plain
+`subprocess.run` it replaced did the same. stdin is now closed for the host
+(`tests/test_review_is_contained.py -k open_stdin`, which builds the open pipe
+itself; the first version of that test passed with the fix removed, because the
+suite's own stdin happened to be at EOF).
+
+The unattended run (`magi run`, docs/design-auto.md) has no per-release smoke of
+its own yet; the cross-host takeover and the end-to-end run on real hosts are
+recorded in that document's §3.5 and §3.7.
+
 **v2.5.1 (2026-09-03, same day):** the three dry-runs were re-run and unchanged;
 the two paid calls were **not** repeated. What changed since v2.5.0 is one
 message in `apply_verdict`, one prose-scanning rule in `state`, one stderr line
