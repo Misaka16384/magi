@@ -710,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {name:<14} {outcome}")
 
     print("\nQuick start:")
-    print("  mkdir my-project && cd my-project && magi init && magi install")
+    print("  mkdir my-project && cd my-project && magi init")
     print("  mkdir -p topics/my-project && cd topics/my-project")
     print('  magi init --title "..." --scope "..."   # scaffolds, then installs into your agent CLIs')
     print("Migrating from Wikify? Run 'magi migrate' at your hub root (migrates every project).")

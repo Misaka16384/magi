@@ -2542,7 +2542,8 @@ def run_graph(args: argparse.Namespace) -> int:
             if _is_pinned(note.frontmatter.get("skeleton")):
                 tag_rows.append((node_id, "skeleton"))
 
-            for field in ("depends_on", "answers", "derivation", "superseded_by"):
+            for field in ("depends_on", "premises", "answers", "derivation",
+                          "superseded_by"):
                 for link in threads_mod.as_list(note.frontmatter.get(field)):
                     cleaned = str(link).strip().strip("[]")
                     if cleaned:

@@ -332,7 +332,7 @@ magi skills uninstall            # take them back out
 The skill files ship with the CLI — **no repo clone, no network**.
 
 > [!WARN]
-> **The default is this project, not your whole machine.** All 9 skills revolve around one research project — ingest into its `raw/`, compile into its `wiki/`, query its graph — so a machine-wide install makes every unrelated project carry them for nothing. If you really want that: `magi skills install --scope global` (it warns once).
+> **The default is this project, not your whole machine.** All 12 skills revolve around one research project — ingest into its `raw/`, compile into its `wiki/`, query its graph — so a machine-wide install makes every unrelated project carry them for nothing. If you really want that: `magi skills install --scope global` (it warns once).
 > Installing into the project has a second benefit: the files travel with the repo, so a collaborator who clones it gets them.
 
 | Host | Global | Project | How it fires |
@@ -383,7 +383,7 @@ The plugin and `magi skills install` coexist — one gives you `/magi:skill-name
 **Any other agent** — the project's `CLAUDE.md` and `AGENTS.md` (identical content, two copies) are the onboarding protocol: run `magi sync` on entry, which commands map to which core, use `magi guide --search` when stuck, and never answer research questions from memory. Any host that reads either file can work here; if it reads neither, pasting `magi --help` is enough.
 
 > [!EXPECT]
-> `magi skills where` shows 9/9 on the project rows. Start a fresh agent session **from that project directory** and the skills appear under `/` (Claude Code, opencode), or just say "ingest the papers in inbox" and watch it act. `magi setup --check` also shows the per-CLI count for the project you are in.
+> `magi skills where` shows 12/12 on the project rows. Start a fresh agent session **from that project directory** and the skills appear under `/` (Claude Code, opencode), or just say "ingest the papers in inbox" and watch it act. `magi setup --check` also shows the per-CLI count for the project you are in.
 
 > [!FIX]
 > - **Installed but not showing**: skills are scanned at startup — **start a new session from the project directory** (project skills are only visible when the CLI is launched there).
@@ -794,6 +794,8 @@ don't download anything. Hand it over and let MAGI pick the route:
 ```powershell
 magi ingest url "https://arxiv.org/abs/2608.16520"   # or a DOI, or several at once
 magi ingest url 2608.16520 --expect "fracton"   # an id from memory: fetch the title, refuse a mismatch
+magi ingest url 2608.16520 --go                 # all the way in one command: fetch, convert, and land it in raw/
+                                                # if nothing was flagged; otherwise the whole batch waits for magi ingest review
 magi ingest batch-run                                 # fetch + convert, unattended
 magi ingest review                                    # see what came out
 magi ingest review --item <ID> --decision approve      # one at a time
@@ -1698,6 +1700,50 @@ status, it is a disagreement, and only a person can say which reading was right 
 rewrites `output/MAP.md`. **MAP.md is a rendering**: editing it changes nothing, because
 the status lives in the note.
 
+
+## Unattended runs {#run}
+
+`magi run start` opens a run and `magi run sign` is your signature on it; after that the agent explores one recorded step at a time with `magi run step` and `magi run result`, `magi run status` is the brief any agent reads on taking over, and `magi run report` hands in the report and ends it. `magi run amend` and `magi run stop` are your two ways in while it is going: change the contract, or call it off.
+
+```powershell
+magi run start --title "KW duality in 3D" --slug run-kw3d   # discussing: an empty contract to talk over with the agent
+magi run sign run-kw3d --steps 40                            # your signature: the contract freezes, 40 steps authorised (2 at once; --max-parallel changes it)
+magi run status                                              # phase, contract, budget, what is half done
+magi run amend run-kw3d --text "drop direction B"            # you changed your mind: back to discussing, edit, sign again
+magi run stop run-kw3d                                       # you call it off: no new step registers, it writes up what it has
+```
+
+You bring an idea or a few papers, talk it down to a few directions with the agent, and leave; when you come back there is **one thing** to read — a report under `drafts/runs/`. Nothing interrupts you in between: what needs your call (a claim the reviewer rejected, a conjecture waiting for your bet) is parked for the length of the run, and `magi next` says how many there are instead of asking.
+
+**Two phases, kept apart by the CLI.** A run is a `kind: run` note in `threads/`; its status is the phase, and it is always the first line `magi next` prints:
+
+| | `discussing` | `running` |
+|---|---|---|
+| What is happening | Talking; the agent writes what you say into the contract (skill `discuss`) | The agent explores under the contract (skill `mentor`; `brief` writes it up) |
+| The contract | Edit it freely | **Frozen.** Signing recorded its fingerprint; change one word of the text or the budget afterwards and the next step will not register, and says why |
+| `magi run step` | Refused — what nobody signed is in no trajectory | Accepted, until the steps are used, the parallel limit is reached, or `--until` has passed |
+
+A signed contract changes one way, and it is yours: `magi run amend`. An agent that thinks the contract is wrong cannot edit it; it can post why and work another direction. This is the guard against the commonest drift — success quietly redefined as whatever was found.
+
+**The state is in files, not in the agent.** Every step is registered before it is taken (what, why, what changes if it holds, what changes if it does not) and closed when it is done; a step whose two outcomes lead to the same next move is trivia and should not be registered. The budget, how much is in flight at once, and what the last session was in the middle of when it died are all counts over those posts — nothing is stored beside them. So when one vendor's quota runs out, another agent CLI opens the same folder and is told "carry on": the first thing `magi next` names is the half-done step, and `magi run status` is everything it needs.
+
+**What rests on what.** `depends_on:` points a proposition at the *concepts* it uses; `premises:` points it at the *other propositions* it takes as given: `magi thread new <slug> --kind proposition … --premise <other-proposition>`, or afterwards `magi thread post <slug> --premise <other-proposition>`. Three things follow, none of them stored: a proposition **stands** when a strong-tier reviewer said `stands` *and* everything it rests on stands too (`supported` is only its author's word); when a premise is later refuted, what was built on it owes a second look — no status is moved for you, somebody has to look and say so; and unattended, `magi next` has the claim others rest on read first, and does not offer a claim that answers no question and that nothing rests on.
+
+**What it hands in: one report.** `magi run outline <run> --write` builds the skeleton from files (add `--empty` when nothing big was found — one page): the contract's motivation, the claims the run touched and whether each stands, the chain in reading order, every step's "what / why / if it holds / if not / what came of it", the refutations that may be worth a paragraph, the methods used. The prose is the `brief` skill's. Then `magi review drafts/runs/<run>.md` — another agent reads it **whole**, for what no claim-by-claim review can see: whether each step uses the sentence the previous one established, whether the notation is one notation, terms used and never defined, an abstract that calls established what is marked unreviewed. Then `magi run report` hands it in, and checks at that moment: every section present, no template comment left unwritten, no claim cited by slug alone (its statement must be in the text), every glossary entry a concept card, and the whole draft read. `--anyway` hands it in regardless, and the hand-in says which checks it failed.
+
+After that your decision queue holds **one** more item: which report, and what reading it costs ("3 terms new to you, 2 of them with lecture notes"). Say something once you have read it — `magi decide --about <run> --text "…"` — and the item clears. A step that should have gone the other way: `magi run overturn <run> <step> --text "…"`, recorded against that step, where the slow loop counts how often it happens.
+
+**Lecture notes, and what you already know.** `magi familiar list` shows the methods a run used. Two buttons (also on the dashboard's research map): `magi familiar known "<concept>"` — I know this, stop defining it for me; `magi familiar notes "<concept>"` — write me notes, which `magi next` then offers to an agent, written under `drafts/lectures/` and anchored at the place this run actually uses it. `magi familiar forget` takes an answer back. The ledger goes with you, not with the project (`~/.config/magi/familiar.jsonl`); a concept you have not answered about is treated as unknown.
+
+**Modes.** `--mode deep | balanced | explore` (at `run start` or `run sign`) is only a name for a set of knobs — may it open new directions, depth first or breadth first, how many setbacks in a row before a direction is given up, one branch or two at a fork, every claim reviewed or only the ones others rest on — and `--knob name=value` changes one of them. The knobs live in the run note and are part of the contract; `magi run status` renders them as the sentences the mentor acts on, so they hold on whichever host picks the run up. **Deep produces a chain that stands; explore produces a map of conjectures** (claims stay `conjectured` and are not called established).
+
+**The budget is steps, not hours** — hours drain away between one host and the next, steps do not. `--steps` has no default; it is the one number you have to say when you sign. Once the steps are used, up to three `--closing` steps may still be registered, to write the report.
+
+On hosts with a stop hook (Claude Code, Codex) the session does not end by itself while the run can still act; the hook holds only while the run is **moving** — two stops in a row with nothing registered or closed in between and it lets go, so it cannot become a loop. Other hosts get a sentence in `AGENTS.md`, best effort. The real gate is `magi run step` itself, which holds on every host.
+
+Before leaving it unattended, check one thing: that your agent CLI will not stop to ask for permission with nobody there to answer.
+
+The full design is `docs/design-auto.md` in the repository.
 
 ## Writing your paper {#writing}
 

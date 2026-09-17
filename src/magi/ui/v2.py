@@ -109,7 +109,54 @@ def register(app, resolve_workspace) -> None:
         # since M6 and the dashboard had no equivalent, so the browser could
         # see what MAGI's own calls had cost. No budget any more — a count.
         payload["budget"] = state_mod.budget(ws)
+        payload["run_cards"] = _runs(ws, st)
         return payload
+
+    def _runs(ws: Path, st) -> list:
+        """Every run that was not dropped, newest first, as the CLI describes it.
+
+        `magi run status --json` and `magi familiar list --json`, joined: the
+        browser shows the phase the terminal prints and the two buttons of
+        design-auto §9, and decides nothing itself.
+        """
+        from magi import familiar_cmd, run_cmd
+        from magi.core import familiar, vocab
+        from magi.kb import runs as runs_mod
+
+        ledger = familiar.load()
+        rows = []
+        for note in st.notes:
+            if note.kind != vocab.RUN or note.status == runs_mod.DROPPED:
+                continue
+            brief = run_cmd.brief(ws, note)
+            rows.append({
+                "slug": note.slug, "title": note.title, "status": note.status,
+                "phase": brief["phase"], "steps": brief["steps"],
+                "report": note.frontmatter.get("report"),
+                "created": str(note.frontmatter.get("created") or ""),
+                "methods": ([] if note.status == runs_mod.DISCUSSING
+                            else familiar_cmd.methods_of(ws, note, st.notes, ledger)),
+            })
+        rows.sort(key=lambda row: row["created"], reverse=True)
+        rows.sort(key=lambda row: row["status"] != runs_mod.RUNNING)
+        return rows[:6]
+
+    @app.post("/api/workspace/familiar")
+    def post_workspace_familiar(payload: dict = Body(...)) -> dict:
+        """One of the two buttons: "I know this" / "write me notes" (or take it back).
+
+        Per user, not per project — `core/familiar.py` — so the workspace is
+        only recorded as where the button was pressed.
+        """
+        from magi.core import familiar
+
+        ws = resolve_workspace(payload.get("workspace"))
+        state_word = payload.get("state") or None
+        try:
+            return familiar.record(payload.get("concept") or "", state_word, via="webui",
+                                   project=ws.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @app.get("/api/workspace/models")
     def get_workspace_models(host: Optional[str] = Query(None),

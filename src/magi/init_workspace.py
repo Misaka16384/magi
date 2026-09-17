@@ -353,6 +353,9 @@ research:
                        # one string for every vendor: pin review_host too, or
                        # put `model:` on a research.hosts record instead
   review_effort:       # low | medium | high; empty = the strong tier's own
+  review_memory_mb: 4096  # MB the reviewer and everything it starts may hold
+                       # together; a runaway script dies instead of the desktop.
+                       # Enforced on Windows (Job Object); 0 = no ceiling
   llm_calls: true      # master switch for MAGI's own calls (there is no weekly
                        # budget; calls are recorded in output/llm-ledger.jsonl)
   rule_budget: 7       # lines the AGENTS.md rule section may hold
@@ -533,7 +536,7 @@ Thumbs.db
         print("  magi install                              # skills, protocol block, hooks")
     if scope == PLACEHOLDER_SCOPE:
         print('  magi config set scope "<one sentence>"    # the protocol block still says a placeholder')
-    print("  magi ingest url <arXiv id, DOI or link>   # bring in sources")
+    print("  magi ingest url <arXiv id or DOI> --go    # bring in sources")
     print("  magi next                                 # from here on, it says what to do")
 
 if __name__ == "__main__":

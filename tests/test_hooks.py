@@ -351,7 +351,14 @@ def test_a_broken_helper_cannot_take_the_session_down(ws, monkeypatch):
     (ws / "inbox").mkdir(exist_ok=True)
     (ws / "inbox" / "paper.md").write_text("x", encoding="utf-8")
 
-    assert hook_cmd.session_start({}, root=ws) == {}
+    # Until 2026-09-17 this asserted `== {}`, which held only because the
+    # broken helper was the one thing that could see the file in inbox/. Now
+    # `magi next` sees it too, so the claim is the stronger one it always
+    # meant: the broken section is absent, and it took nothing else with it.
+    answer = hook_cmd.session_start({}, root=ws)
+    context = answer["hookSpecificOutput"]["additionalContext"]
+    assert "Left in flight" not in context
+    assert "what this project needs" in context and "magi ingest auto" in context
 
 
 def test_the_refusal_is_spelled_the_way_each_host_reads_it(ws):

@@ -14,7 +14,10 @@ Three things are frozen here and each has a reason:
 the only kind with a full lifecycle. `question` is open-ended — it has no truth
 value, its children are propositions, and it closes when they answer it.
 `line` is a research line whose note body *is* its STATUS, so its statuses are
-phases of work rather than claims about the world.
+phases of work rather than claims about the world. `run` is one unattended
+exploration (docs/design-auto.md): its body is the contract a person signed,
+its Discussion is the trajectory, and its status is the *phase* — whether the
+agent in front of it is there to talk or to act.
 
 **Legal transitions.** Not to police research — an agent that discovers the
 answer in the literature may go from ``open`` straight to ``supported`` and
@@ -49,8 +52,9 @@ from __future__ import annotations
 PROPOSITION = "proposition"
 QUESTION = "question"
 LINE = "line"
+RUN = "run"
 
-KINDS = (PROPOSITION, QUESTION, LINE)
+KINDS = (PROPOSITION, QUESTION, LINE, RUN)
 
 # ---------------------------------------------------------------- statuses
 
@@ -71,6 +75,12 @@ STATUSES = {
     ),
     QUESTION: ("open", "answered", "abandoned", CONFLICT),
     LINE: ("exploring", "active", "writing", "dormant", "closed", CONFLICT),
+    # `discussing` and `running` are the two phases and they alternate: an
+    # amendment is a person taking a signed contract back to the table.
+    # `reported` is a run that handed in its one deliverable; `dropped` is a
+    # contract nobody signed — without it a run that was talked about and
+    # abandoned would announce "DISCUSSING" at the top of `magi next` forever.
+    RUN: ("discussing", "running", "reported", "dropped", CONFLICT),
 }
 
 #: The status a note gets when it is created, per kind.
@@ -78,6 +88,7 @@ INITIAL_STATUS = {
     PROPOSITION: "open",
     QUESTION: "open",
     LINE: "exploring",
+    RUN: "discussing",
 }
 
 #: Reaching this triggers the reviewer (`magi review`, batched at `--close`).
@@ -89,6 +100,7 @@ QUEUE_TRIGGERS = frozenset({
     (PROPOSITION, CONFLICT),
     (QUESTION, CONFLICT),
     (LINE, CONFLICT),
+    (RUN, CONFLICT),
 })
 
 # ---------------------------------------------------------------- transitions
@@ -123,6 +135,13 @@ _TRANSITIONS = {
         "closed": ("active", "dormant"),
         CONFLICT: ("exploring", "active", "writing", "dormant", "closed"),
     },
+    RUN: {
+        "discussing": ("running", "dropped"),
+        "running": ("discussing", "reported"),
+        "reported": (),
+        "dropped": (),
+        CONFLICT: ("discussing", "running", "reported", "dropped"),
+    },
 }
 
 # ---------------------------------------------------------------- actors
@@ -140,7 +159,14 @@ _DEFAULT_WRITERS = frozenset({AGENT, HUMAN, REVIEWER, CLI})
 
 #: ``(kind, to_status)`` pairs a person alone may write. Closing a line is a
 #: ritual (design §6); reopening one is the same decision in reverse.
-_HUMAN_ONLY_TARGETS = frozenset({(LINE, "closed")})
+#: A run's phase changes are a person's too, in both directions: signing is
+#: what authorises an agent to spend unattended, and taking a signed contract
+#: back (`running → discussing`) is the only way its goals may change. An agent
+#: that could do either could redefine success as whatever it found.
+_HUMAN_ONLY_TARGETS = frozenset({
+    (LINE, "closed"),
+    (RUN, "running"), (RUN, "discussing"), (RUN, "dropped"),
+})
 
 #: Statuses that only a person's decision moves a note out of. All three are
 #: adjudications rather than findings: ``conflict`` means two writers disagreed
@@ -149,6 +175,14 @@ _HUMAN_ONLY_TARGETS = frozenset({(LINE, "closed")})
 #: is the far side of the ritual, and reopening a line is the same decision in
 #: reverse. Each of them is a decision-queue entry until a person answers it.
 _HUMAN_ONLY_SOURCES = frozenset({CONFLICT, "disputed", "closed"})
+
+
+#: The one way out of `disputed` that is nobody's adjudication: the author
+#: agrees with the reviewer. `disputed` is human-only to leave because the
+#: alternative is the machine overruling its own reviewer — and conceding
+#: overrules nobody. Without this an unattended run (docs/design-auto.md §7)
+#: parks for a person every claim its own author has already given up.
+_CONCEDED = (PROPOSITION, "disputed", "refuted")
 
 
 def statuses(kind: str) -> tuple:
@@ -190,6 +224,8 @@ def writers(kind: str, src: str, dst: str) -> frozenset:
         return frozenset()
     if dst == CONFLICT:
         return frozenset({CLI})
+    if (kind, src, dst) == _CONCEDED:
+        return _DEFAULT_WRITERS
     if src in _HUMAN_ONLY_SOURCES or (kind, dst) in _HUMAN_ONLY_TARGETS:
         return frozenset({HUMAN})
     return _DEFAULT_WRITERS
@@ -271,6 +307,7 @@ _SETTLED_STATUSES = frozenset({
     "supported", "refuted", "superseded",   # proposition
     "answered", "abandoned",                # question
     "dormant", "closed",                    # line
+    "reported", "dropped",                  # run
 })
 
 

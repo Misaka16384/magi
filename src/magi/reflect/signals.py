@@ -39,7 +39,16 @@ REJECTION = "rejection"
 #: evidence that can support "keep doing it this way".
 CLEAN = "clean"
 
-LOSSES = (REVERSAL, DEBT, REJECTION)
+#: A person, reading a run's report, said a step should have gone the other
+#: way. The steering no contract held in advance (docs/design-auto.md §10);
+#: enough of these about the same kind of fork is a line for the next contract.
+OVERTURN = "overturn"
+
+#: A person took a signed contract back to change it mid-run: an intent that
+#: formed only after the run had started.
+AMENDMENT = "amendment"
+
+LOSSES = (REVERSAL, DEBT, REJECTION, OVERTURN, AMENDMENT)
 WINS = (CLEAN,)
 
 
@@ -72,6 +81,7 @@ def collect(state) -> list:
     out.extend(_reversals(state))
     out.extend(_rejections(state))
     out.extend(_debt(state))
+    out.extend(_runs(state))
     out.extend(_clean(state))
     out.sort(key=lambda signal: signal.at or "")
     return out
@@ -110,6 +120,27 @@ def _rejections(state) -> list:
                 out.append(Signal(REJECTION, note.slug, post.at,
                                   "an independent reader did not accept the claim as "
                                   "written"))
+    return out
+
+
+def _runs(state) -> list:
+    """What a person corrected about an unattended run, after or during it."""
+    out = []
+    for note in state.notes:
+        if note.kind != vocab.RUN:
+            continue
+        for post in note.posts:
+            if post.host != vocab.HUMAN:
+                continue
+            first = ((post.text or "").strip().splitlines() or [""])[0]
+            if first.startswith("OVERTURN "):
+                out.append(Signal(OVERTURN, note.slug, post.at,
+                                  "the person said a step of an unattended run should "
+                                  f"have gone otherwise — {first[:160]}"))
+            elif first.startswith("AMEND"):
+                out.append(Signal(AMENDMENT, note.slug, post.at,
+                                  "the person changed a signed contract mid-run: an intent "
+                                  "the discussion had not captured"))
     return out
 
 

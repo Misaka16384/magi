@@ -53,6 +53,7 @@ from pathlib import Path, PureWindowsPath
 
 from .core import hosts as host_table
 from .core import ledger, vocab
+from .core import proc as proc_mod
 from .core.workspace import find_workspace_root
 from .kb import threads
 
@@ -148,9 +149,12 @@ all; where there is none, the title is the claim. Whatever it names under
 checks it — scripts, data, notebooks: read them, and run them if you are able
 to. The sources it cites under `raw/` are the evidence. You may also read other
 files under `drafts/`, `wiki/`, `tools/` and `raw/` when the argument leans on
-them. The `## Discussion` section is commentary: read it for context, but a
+them. If it lists `premises:`, those are other propositions it takes as given:
+you may read them to see exactly what is assumed, but you are not judging them
+here — say so under ASSUMPTION if the claim leans on one that looks unsound.
+The `## Discussion` section is commentary: read it for context, but a
 slip in a post is not a flaw in the claim, and nothing in a post counts as
-evidence for or against it. Do not read other notes under `threads/`, and
+evidence for or against it. Do not read any other notes under `threads/`, and
 nothing about how the project is going — your value here is that you have no
 stake in the answer.
 
@@ -222,6 +226,8 @@ class Verdict:
     #: Recorded in the post: a reader weighing a same-vendor verdict deserves
     #: to know the cross-vendor one was tried.
     fell_back: list = field(default_factory=list)
+    #: PIDs the reviewer left running when it answered; MAGI ended them.
+    leftover: list = field(default_factory=list)
 
     @property
     def ran(self) -> bool:
@@ -581,10 +587,42 @@ def _refuse_truncating_wrapper(argv: list[str]) -> None:
         "`magi review --host <other>`.")
 
 
+#: Committed memory the reviewer and everything it starts may hold together,
+#: in MB. A reviewer asked to check a claim writes a script and runs it; on
+#: 2026-09-17 one such script was an endless search that reached 18.9 GB and
+#: took the desktop down. Enforced where the platform can (`core/proc.py` says
+#: where that is); `research.review_memory_mb: 0` turns it off.
+MEMORY_MB = 4096
+
+
+class Reply(str):
+    """What the host printed, plus what it left behind.
+
+    Still a `str`, because a reply is what every caller and every test of
+    `ask` handles. `leftover` is the processes that were alive under the host
+    when it returned — all ended by then — and it matters to the verdict: a
+    reviewer that says "exact search confirms" while its search was still
+    running has not run it.
+    """
+    leftover: list = []
+    capped: bool = False
+
+
+def _run_host(argv, cwd, timeout, memory_mb):
+    """The one place a reviewer process is started."""
+    return proc_mod.run_contained(argv, cwd=str(cwd), timeout=timeout,
+                                  memory_mb=memory_mb)
+
+
 def ask(host: str, prompt: str, cwd, model: str | None = None,
         timeout: int = TIMEOUT, effort: str | None = None,
         settings: "Settings | None" = None, allow_run: bool = False) -> str:
     """Run one headless review. Returns the reply, or raises.
+
+    The host runs contained: a ceiling on what its whole tree may commit, and
+    nothing it started outlives the call — not on a normal return, where the
+    stragglers are counted into `Reply.leftover` first, and not on a timeout,
+    where `subprocess.run` used to end the host and leave its children.
 
     The host is told the same ceiling MAGI is waiting, where it has a flag for
     one, and MAGI then waits a little longer. Two clocks set to the same second
@@ -605,12 +643,15 @@ def ask(host: str, prompt: str, cwd, model: str | None = None,
     if found:
         argv = [found] + argv[1:]
     _refuse_truncating_wrapper(argv)
-    proc = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
+    memory_mb = settings.memory_mb if settings else MEMORY_MB
+    proc = _run_host(argv, cwd, timeout, memory_mb)
     if proc.returncode != 0 and not (proc.stdout or "").strip():
         raise RuntimeError(f"{host} exited {proc.returncode}: "
                            f"{(proc.stderr or '').strip()[-300:]}")
-    return proc.stdout or ""
+    reply = Reply(proc.stdout or "")
+    reply.leftover = list(getattr(proc, "leftover", None) or [])
+    reply.capped = bool(getattr(proc, "capped", False))
+    return reply
 
 
 def _brief(exc: BaseException) -> str:
@@ -677,14 +718,15 @@ def review(root, slug: str, author: str | None = None, host: str | None = None,
                    note=exc.__class__.__name__, effort=level, tier=tier)
             failures.append((chosen, _brief(exc)))
             continue
+        leftover = list(getattr(reply, "leftover", None) or [])
         _spend(root, chosen, slug, picked, ok=True, since=started, effort=level,
-               tier=tier)
+               tier=tier, note=(f"leftover:{len(leftover)}" if leftover else ""))
         verdict, parts = parse_reply(reply)
         return Verdict(slug=slug, verdict=verdict, reason=parts.get("REASON", ""),
                        host=chosen, raw=reply, model=picked, effort=level, tier=tier,
                        checked=parts.get("CHECKED", ""),
                        assumption=parts.get("ASSUMPTION", ""),
-                       fell_back=failures)
+                       fell_back=failures, leftover=leftover)
     raise RuntimeError("no reviewer answered — "
                        + "; ".join(f"{name}: {why}" for name, why in failures))
 
@@ -698,6 +740,15 @@ def _spend(root, host, slug, model, *, ok, since, note="", effort=None,
                       tier=tier)
     except OSError:
         pass
+
+
+def leftover_note(result: Verdict) -> str:
+    """One sentence for the post when the reviewer answered with work still running."""
+    count = len(result.leftover)
+    return (f"Still running when it answered: {count} process"
+            f"{'' if count == 1 else 'es'} the reviewer had started, ended by MAGI. "
+            "A computation this verdict cites may not have finished — weigh "
+            "\"confirmed by search\" accordingly.")
 
 
 def signature(result: Verdict) -> str:
@@ -750,6 +801,8 @@ def apply_verdict(root, result: Verdict) -> str:
         body += f"\n\nChecked: {result.checked}"
     if result.assumption:
         body += f"\n\nLoad-bearing: {result.assumption}"
+    if result.leftover:
+        body += "\n\n" + leftover_note(result)
     body += f"\n\n({signature(result)})"
     if result.verdict == VERDICT_UNCLEAR and _needs_evidence(result):
         # The fallback reason promises the reply is here. Without it a reader
@@ -1010,6 +1063,197 @@ class Settings:
     model: str | None = None
     effort: str | None = None
     config: dict | None = None
+    memory_mb: int = MEMORY_MB
+
+
+# ---------------------------------------------------------------- whole drafts
+#
+# A claim-by-claim review cannot see the things a report gets wrong as a whole
+# (docs/design-auto.md §9): a claim that was restated after its review while the
+# step after it still quotes the old words; one symbol meaning two things in two
+# derivations written a day apart; a term used and never defined; an abstract
+# that calls established what the chain marks unreviewed. Unifying notation is
+# itself a step that introduces errors, and it is taken by the agent that wrote
+# everything else. So before a person reads a run's report, another agent reads
+# it whole. Same machinery — headless, another vendor where there is one, the
+# strong tier, contained — and a different question.
+
+REPORT_PROMPT = """You are reading one report whole, before a person does. You did not write it.
+
+Workspace: {root}
+Report: {report}
+It reports the unattended run recorded in threads/{run}.md. The claims it cites
+are notes under `threads/`; read them, and whatever they name under
+`derivation:` and `evidence:`. Each claim may already have been reviewed on its
+own. Your job is what no claim-by-claim review can see:
+
+1. Composition. Does each step use what the step before it actually
+   established — the same statement, the same quantifiers? A claim reworded
+   after its review, quoted downstream in its old words, is the typical break.
+2. Notation. One symbol, one meaning, from start to end, and the same as in the
+   derivations it summarises.
+3. Terms. Anything used before it is defined, or never defined. Every entry
+   under "Terms" should be a card under `wiki/concepts/`.
+4. Overstatement. Does the abstract or "Proved and not proved" present as
+   established something the report itself marks `unreviewed` or `contested`?
+5. The record. Do "Decisions" and "Failures worth knowing" match the steps and
+   results in threads/{run}.md, or has the story been tidied?
+
+Verify at least one thing yourself: follow one step of the chain through the
+derivation it points at, or rerun one script it names, and say what came out.
+
+Verdicts:
+- stands: it reads as a sound whole.
+- restate: sound, but words or notation must change. List exactly which.
+- refuted: a link in the chain does not hold. Name the step and why.
+- unclear: you cannot tell without something that is not here. Say what.
+
+Answer in exactly this form and nothing else — one word, not the list:
+
+VERDICT: <stands, restate, refuted, or unclear>
+CHECKED: <one or two sentences: what you followed or ran, and what came out>
+ASSUMPTION: <one sentence: the weakest link of the chain, and whether the conclusion survives without it>
+REASON: <two or three sentences, naming the section and the line you are talking about>
+"""
+
+
+def is_report(argument: str) -> bool:
+    text = str(argument).replace("\\", "/")
+    return text.endswith(".md") or "/" in text
+
+
+def _report_run(root, relative: str):
+    """The run a report belongs to — named in its own frontmatter."""
+    from .core.wiki_common import parse_frontmatter_text, split_frontmatter_text
+
+    target = Path(root) / relative
+    if not target.is_file():
+        raise RuntimeError(f"{relative} is not a file in this project")
+    split = split_frontmatter_text(target.read_text(encoding="utf-8", errors="replace"))
+    run = str((parse_frontmatter_text(split[0]) if split else {}).get("run") or "").strip()
+    if not run:
+        raise RuntimeError(f"{relative} names no `run:` in its frontmatter — start it from "
+                           "`magi run outline <run> --write`")
+    note = threads.read_note(_note_path(root, run))
+    if note.kind != vocab.RUN:
+        raise RuntimeError(f"{relative} says `run: {run}`, and {run} is a {note.kind}")
+    return note
+
+
+def _report_author(run_note, config=None) -> str | None:
+    """Whoever did most of the run wrote its report, near enough: the reviewer
+    should be somebody else."""
+    known = set(host_names(config))
+    hosts = [post.host for post in run_note.posts if post.host in known]
+    return max(set(hosts), key=hosts.count) if hosts else None
+
+
+def review_report(root, relative: str, host: str | None = None, model: str | None = None,
+                  timeout: int | None = None, effort: str | None = None,
+                  settings: "Settings | None" = None, allow_run: bool = False,
+                  fallback: bool = True) -> Verdict:
+    config = settings.config if settings else None
+    run_note = _report_run(root, relative)
+    order = reviewers(_report_author(run_note, config), configured=host, config=config,
+                      fallback=fallback)
+    if not order:
+        raise RuntimeError("no reviewer CLI on PATH "
+                           f"(looked for {', '.join(host_names(config))})")
+    ledger.check(root, enabled=(settings.enabled if settings else True))
+    prompt = REPORT_PROMPT.format(root=root, report=relative, run=run_note.slug)
+    tag = f"report:{run_note.slug}"
+    failures: list = []
+    for position, chosen in enumerate(order):
+        entry, picked, level = plan(chosen, model if position == 0 else None, effort, settings)
+        tier = entry.tier_of(picked)
+        started = time.monotonic()
+        try:
+            reply = ask(chosen, prompt, cwd=root, model=picked,
+                        timeout=timeout or TIMEOUT * 2, effort=level, settings=settings,
+                        allow_run=allow_run)
+        except (KeyboardInterrupt, SystemExit):
+            _spend(root, chosen, tag, picked, ok=False, since=started, note="interrupted",
+                   effort=level, tier=tier)
+            raise
+        except Exception as exc:  # noqa: BLE001 - recorded, then the next host
+            _spend(root, chosen, tag, picked, ok=False, since=started,
+                   note=exc.__class__.__name__, effort=level, tier=tier)
+            failures.append((chosen, _brief(exc)))
+            continue
+        leftover = list(getattr(reply, "leftover", None) or [])
+        _spend(root, chosen, tag, picked, ok=True, since=started, effort=level, tier=tier,
+               note=(f"leftover:{len(leftover)}" if leftover else ""))
+        verdict, parts = parse_reply(reply)
+        return Verdict(slug=run_note.slug, verdict=verdict, reason=parts.get("REASON", ""),
+                       host=chosen, raw=reply, model=picked, effort=level, tier=tier,
+                       checked=parts.get("CHECKED", ""),
+                       assumption=parts.get("ASSUMPTION", ""),
+                       fell_back=failures, leftover=leftover)
+    raise RuntimeError("no reviewer answered — "
+                       + "; ".join(f"{name}: {why}" for name, why in failures))
+
+
+def apply_report_verdict(root, relative: str, result: Verdict) -> str:
+    """Post the reading on the run note. It moves nothing: what to do about a
+    report that does not hold together is the mentor's next step, and handing
+    it in is gated on this post, not on a status."""
+    body = f"report: {relative}\n\n{result.reason}"
+    if result.checked:
+        body += f"\n\nChecked: {result.checked}"
+    if result.assumption:
+        body += f"\n\nWeakest link: {result.assumption}"
+    if result.leftover:
+        body += "\n\n" + leftover_note(result)
+    body += f"\n\n({signature(result)})"
+    if result.verdict == VERDICT_UNCLEAR and _needs_evidence(result):
+        body += "\n\nWhat it actually said:\n\n" + _excerpt(result.raw)
+    threads.append_post(_note_path(root, result.slug), f"VERDICT: {result.verdict}\n\n{body}",
+                        host=vocab.REVIEWER)
+    then = {VERDICT_STANDS: f"hand it in: magi run report {result.slug} {relative}",
+            VERDICT_RESTATE: "change what the post names, then hand it in",
+            VERDICT_REFUTED: "a link does not hold — fix the chain, then have it read again",
+            VERDICT_UNCLEAR: "it could not tell — supply what it asked for, then again"}
+    return f"{relative}: {result.verdict} — {then[result.verdict]}"
+
+
+def _review_reports(root, paths, args, settings, wanted_host) -> int:
+    failed = 0
+    for raw in paths:
+        target = Path(raw)
+        try:
+            relative = (target.resolve() if target.is_absolute()
+                        else (Path(root) / target).resolve()).relative_to(
+                            Path(root).resolve()).as_posix()
+        except ValueError:
+            print(f"{raw} is outside the project", file=sys.stderr)
+            failed += 1
+            continue
+        try:
+            if args.dry_run:
+                run_note = _report_run(root, relative)
+                order = reviewers(_report_author(run_note, settings.config),
+                                  configured=wanted_host, config=settings.config,
+                                  fallback=args.fallback)
+                print(f"would ask {', then '.join(order) or 'nobody (no reviewer CLI)'} to "
+                      f"read {relative} whole (run {run_note.slug})")
+                continue
+            result = review_report(root, relative, host=wanted_host, model=args.model,
+                                   timeout=args.timeout, effort=args.effort,
+                                   settings=settings, allow_run=args.allow_run,
+                                   fallback=args.fallback)
+            line = apply_report_verdict(root, relative, result)
+        except (RuntimeError, OSError, ledger.SwitchedOff, FileNotFoundError) as exc:
+            print(f"{relative}: not read — {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        if args.json:
+            print(json.dumps({"report": relative, "run": result.slug,
+                              "verdict": result.verdict, "host": result.host,
+                              "model": result.model, "tier": result.tier},
+                             ensure_ascii=False))
+        else:
+            print(line)
+    return 1 if failed else 0
 
 
 def _config(root) -> Settings:
@@ -1029,7 +1273,19 @@ def _config(root) -> Settings:
         host=(config_get(config, "research.review_host", "") or None),
         model=(config_get(config, "research.review_model", "") or None),
         effort=(config_get(config, "research.review_effort", "") or None),
-        config=config)
+        config=config,
+        memory_mb=_memory_mb(config_get(config, "research.review_memory_mb", MEMORY_MB)))
+
+
+def _memory_mb(value) -> int:
+    """The configured ceiling. Anything unreadable is the default, not zero:
+    a typo must not be what removes the limit."""
+    if value is None or value == "":
+        return MEMORY_MB
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return MEMORY_MB
 
 
 def describe(host: str, model: str, effort: str, tier: str = "") -> str:
@@ -1047,7 +1303,9 @@ def main(argv=None) -> int:
         prog="magi review",
         description="Have another agent CLI check a claim that says it is solved.")
     parser.add_argument("slug", nargs="*",
-                        help="Propositions to review (default: everything unreviewed)")
+                        help="Propositions to review (default: everything unreviewed), or "
+                             "the path of a run's report under drafts/runs/ to have it "
+                             "read whole")
     parser.add_argument("--project-dir", "--topic-dir", dest="topic_dir", help="Project directory (default: discovered from cwd)")
     # No `choices=` on purpose. The table depends on `research.hosts`, and the
     # workspace it comes from is not known until `--topic-dir` has been parsed
@@ -1095,6 +1353,14 @@ def main(argv=None) -> int:
         return 1
 
     wanted_host = args.host or settings.host
+
+    reports = [item for item in args.slug if is_report(item)]
+    if reports:
+        if len(reports) != len(args.slug):
+            print("a report path and proposition slugs are two different readings — "
+                  "ask for them separately", file=sys.stderr)
+            return 1
+        return _review_reports(root, reports, args, settings, wanted_host)
 
     slugs = args.slug or pending(root)
     if not slugs:

@@ -1783,6 +1783,9 @@ def create_app(extra_allowed_hosts: list[str] | None = None) -> FastAPI:
         # usually already carries the level.
         "research.review_effort": {"type": "str",
                                    "choices": ["", "low", "medium", "high"]},
+        # MB the reviewer's whole process tree may commit. A reviewer writes
+        # scripts and runs them; one ran away to 18.9 GB (2026-09-17).
+        "research.review_memory_mb": {"type": "int"},
         # The switch that turns MAGI's own calls off entirely. There is no
         # weekly budget any more (core/ledger.py says why); the ledger still
         # counts every call so the dashboard can show what a week cost.

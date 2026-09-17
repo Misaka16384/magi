@@ -25,10 +25,11 @@ Full syntax for any command: `magi <command> --help`; overview: `magi --help`.
 
 ```powershell
 pipx upgrade --install magi-research           # install or upgrade — safe to re-run
-mkdir my-topic ; cd my-topic ; magi init ; magi install
+mkdir my-topic ; cd my-topic ; magi init
+magi ingest url 2609.14858 --go                # optional: bring a seed paper (arXiv id or DOI) into raw/ in one command
 ```
 
-That is the whole setup. `magi init` scaffolds the project; `magi install` puts the skills, the protocol and the session hooks into **every** agent CLI it detects — it does not ask, because they do not conflict.
+That is the whole setup. `magi init` does it in one step: it scaffolds the project and puts the skills, the protocol and the session hooks into **every** agent CLI it detects — it does not ask, because they do not conflict. If you add another agent CLI later, run `magi install` once.
 
 Now open your agent there and **say what you want** — "ingest the papers in inbox", "compile the backlog", "what should I work on?". The skills load themselves by description; you do not have to remember any of them.
 
@@ -206,7 +207,7 @@ Run `magi setup` and it asks about each one, with the official download link. Sa
 
 ### 2.4 Installing the skills (teaching your agent)
 
-All 9 skills ship inside the wheel (`magi/skills/*/SKILL.md`), so **one command inside your project** installs them into every agent CLI on your machine — no repo clone needed:
+All 12 skills ship inside the wheel (`magi/skills/*/SKILL.md`), so **one command inside your project** installs them into every agent CLI on your machine — no repo clone needed:
 
 ```powershell
 cd <your project>
@@ -241,13 +242,12 @@ claude plugin marketplace add Misaka16384/magi && claude plugin install magi
 ```powershell
 mkdir quantum-toys ; cd quantum-toys
 magi init --name "Quantum Toys" --scope "quantum phenomena in toy models"
-# ^ creates raw/ wiki/ threads/ drafts/ decisions.md, AGENTS.md (managed block), config.yaml
-magi install                 # skills + protocol block + stop gate (every CLI it finds, no prompt)
-magi pm init                 # optional task tracking. It hands this directory to bd, which
-                             # git-inits and commits under your own identity — it says so
-                             # and asks before it does
+# ^ creates raw/ wiki/ threads/ drafts/ decisions.md, AGENTS.md (managed block), config.yaml,
+#   and installs skills + protocol block + stop gate into every CLI it finds (no prompt)
+magi next                    # from here on it says what comes next: it sees files in inbox/ and queued links
 
-magi sync --fix              # sync ratio + three cores, and run the repairs it suggests
+# Optional task tracking: `magi pm init` hands this directory to bd, which git-inits and
+# commits under your own identity — it says so and asks before it does. Nothing else needs it.
 ```
 
 ```text
@@ -293,6 +293,9 @@ Trigger via slash commands in your agent (namespaced `magi:` under the Claude Co
 | Draft | `draft` | Write in `drafts/`: ground in the project, export citations with `magi bib`, check claims, formulas and links |
 | Radar | `radar_review` | Triage a radar digest — the score is a rank, not a verdict; the judgement is yours |
 | Adopt | `adopt` | Take a folder that already holds material: inventory, plan, move (references repaired), then open what the material already claims |
+| Run · discuss | `discuss` | The first half of an unattended run: talk the directions over with you and write them down as a contract (motivation, directions, what is not worth it, when to stop, your taste), which you sign. Nothing is authorised in this phase |
+| Run · hand in | `brief` | Writes the run's one deliverable — its report, from a skeleton `magi run outline` builds out of files (the claims and whether each stands, the chain, every step's decision) — and the lecture notes you asked for. No coined names, no bare slugs; a full draft is read whole by another agent before you are |
+| Run · act | `mentor` | The second half: the contract is frozen, every step is registered with `magi run step` before it is taken and closed with `magi run result`. All of the state is in files — when one vendor's quota runs out, another agent opens the same folder and carries on |
 
 A single-command wrapper is not a skill any more: `magi init` scaffolds,
 `magi lint --fix` repairs, `magi graph build` builds the graph, `magi link`

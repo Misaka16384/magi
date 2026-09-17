@@ -245,17 +245,64 @@ def cmd_url(args) -> int:
         # they had just filled sat untouched, and a different library's queue
         # got processed instead.
         where = f' --topic-dir "{topic}"' if args.library else ""
-        print(f"Run them:  magi ingest batch-run{where}")
+        if not getattr(args, "go", False):
+            print(f"Run them:  magi ingest batch-run{where}")
+    if getattr(args, "go", False) and not refused and not args.json:
+        return _go(topic)
     # A refused target is a target not queued, and the exit code says so
     # even when the others went in.
     return 1 if refused else 0
+
+
+def _go(topic) -> int:
+    """Fetch, convert, and land what came through clean — in this one call.
+
+    A link used to take four commands to become a file in `raw/`: queue it,
+    run the queue, list the batch, approve and commit. The listing exists so
+    that a person sees what a conversion flagged before it lands, and that is
+    kept exactly: a batch with a failed item or a loud finding in it is left
+    where `magi ingest review` shows it, whole, and nothing of it is committed.
+    A batch with nothing to show has nothing for the listing to protect.
+    """
+    import argparse
+
+    from . import batch
+
+    before = set(ledger.list_batches(topic))
+    base = {"topic_dir": str(topic), "json": False, "batch": None, "item": None,
+            "decision": None, "limit": None, "no_figures": False}
+    rc = batch.cmd_run(argparse.Namespace(**base))
+    fresh = [b for b in ledger.list_batches(topic) if b not in before]
+    if rc != 0 or not fresh:
+        return rc
+
+    needs = [item for b in fresh
+             for item in ledger.blocking_commit(ledger.load_batch(topic, b))
+             if not item.ok or ledger.loud_findings(item)]
+    if needs:
+        print(f"\n{len(needs)} item(s) need a look before anything lands:")
+        for item in needs:
+            what = str(item.title or item.source_value)[:60]
+            why = ("did not convert" if not item.ok
+                   else f"{ledger.loud_findings(item)} flag(s)")
+            print(f"  {item.item_id}  {what} — {why}")
+        print("Then: magi ingest review")
+        return 0
+
+    for b in fresh:
+        args = argparse.Namespace(**{**base, "batch": b, "commit": True})
+        rc = batch.cmd_approve_all(args) or batch.cmd_commit(args)
+        if rc != 0:
+            return rc
+    return 0
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="magi ingest url",
         description="Queue a paper for deterministic acquisition. "
-                    "Nothing is fetched or written until 'magi ingest batch-run'.")
+                    "Nothing is fetched or written until 'magi ingest batch-run' "
+                    "— or pass --go to do it all now.")
     parser.add_argument("targets", nargs="+",
                         help="One or more URLs, DOIs, arXiv ids, or file paths")
     parser.add_argument("--project-dir", "--topic-dir", dest="topic_dir", help="Project root (default: discovered)")
@@ -269,6 +316,10 @@ def main(argv=None) -> int:
                              "typed from memory.")
     parser.add_argument("--fetch-title", action="store_true",
                         help="Fetch and print the title before queuing; no check")
+    parser.add_argument("--go", action="store_true",
+                        help="Do not stop at queued: fetch and convert now, and land "
+                             "what came through with nothing flagged. Anything flagged "
+                             "or failed is left, whole batch, for 'magi ingest review'.")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     args = parser.parse_args(argv)
     return cmd_url(args)

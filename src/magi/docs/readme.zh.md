@@ -25,10 +25,11 @@
 
 ```powershell
 pipx upgrade --install magi-research           # 装或升级，重复跑没副作用
-mkdir my-topic ; cd my-topic ; magi init ; magi install
+mkdir my-topic ; cd my-topic ; magi init
+magi ingest url 2609.14858 --go                # 可选：带一篇种子论文进来（arXiv 号或 DOI），一条命令落进 raw/
 ```
 
-装完了，就这两条。`magi init` 建项目；`magi install` 把技能、协议和会话钩子装进你机器上**每一个**它探测到的 agent CLI（不问你，因为它们互不冲突）。
+装完了。`magi init` 一步做完：建项目，并把技能、协议和会话钩子装进你机器上**每一个**它探测到的 agent CLI（不问你，因为它们互不冲突）。之后装了新的 agent CLI，再跑一次 `magi install` 即可。
 
 然后在那个目录里打开你的 agent，**把你想做的事说出来**——「摄入 inbox 里的论文」「把待编译的都编译了」「我接下来该做什么」。技能会按描述自己加载，你不用记住任何一个。
 
@@ -202,7 +203,7 @@ uv tool install --force magi-research
 
 ### 2.4 Skills 安装（教 agent 用 MAGI）
 
-9 个 skill 随 CLI 一起分发（`magi/skills/*/SKILL.md`，在 wheel 里），**在项目里一条命令**装进你机器上所有 agent CLI，不需要 clone 仓库：
+12 个 skill 随 CLI 一起分发（`magi/skills/*/SKILL.md`，在 wheel 里），**在项目里一条命令**装进你机器上所有 agent CLI，不需要 clone 仓库：
 
 ```powershell
 cd <你的项目>
@@ -237,12 +238,12 @@ claude plugin marketplace add Misaka16384/magi && claude plugin install magi
 ```powershell
 mkdir quantum-toys ; cd quantum-toys
 magi init --name "Quantum Toys" --scope "玩具模型中的量子现象"
-# ↑ 生成 raw/ wiki/ threads/ drafts/ decisions.md、AGENTS.md（托管块）、config.yaml
-magi install                 # 技能 + 协议块 + 收工闸门（装进它探测到的每个 CLI，不问）
-magi pm init                 # 可选：任务追踪。它把这个目录交给 bd —— 会 git-init、
-                             # 并用你自己的 git 身份提交。跑之前它会说清楚并问你
+# ↑ 生成 raw/ wiki/ threads/ drafts/ decisions.md、AGENTS.md（托管块）、config.yaml，
+#   并把技能 + 协议块 + 收工闸门装进它探测到的每个 CLI（不问）
+magi next                    # 从这里开始，它告诉你下一步：inbox/ 里有文件、队列里有链接，它都看得见
 
-magi sync --fix              # 同步率 + 三核状态，并把能自动修的都跑掉
+# 可选：任务追踪。`magi pm init` 把这个目录交给 bd —— 会 git-init、并用你自己的
+# git 身份提交；跑之前它会说清楚并问你。不装也不影响其余任何功能。
 ```
 
 ```text
@@ -288,6 +289,9 @@ MAGI SYSTEM ONLINE — sync ratio 59.2%
 | 写作 | `draft` | 在 `drafts/` 里写：检索取证 → `magi bib` 导出引用 → 校验 claim / 公式 / 链接 |
 | 雷达 | `radar_review` | 对 radar 摘要做 triage：分数只是排序不是判据，判断在你 |
 | 接管 | `adopt` | 把已经堆了材料的文件夹接进来：盘点 → 计划 → 搬动（引用自动改对）→ 把材料已有的主张开成命题 |
+| 运行·讨论 | `discuss` | 无人值守运行的前半：和你把方向谈透，写成契约（动机、方向、不值得做的、何时停、你的口味），由你签字。这个阶段不授权任何探索 |
+| 运行·交付 | `brief` | 写运行唯一的交付物——报告（骨架由 `magi run outline` 从文件生成：命题与是否立住、依赖链、各步决断），以及你点名要的讲义。不自己起名词、不裸引 slug；草稿交付前由另一个 agent 整稿读一遍 |
+| 运行·执行 | `mentor` | 无人值守运行的后半：契约冻结，每一步先 `magi run step` 登记、做完 `magi run result` 结清。状态全在文件里——一家额度用完，换一家 agent 进同一个目录接着跑 |
 
 单命令的包装不再是 skill：建库是 `magi init`，修复是 `magi lint --fix`，建图是
 `magi graph build`，语义连边是 `magi link`，查手册是 `magi guide`。样板（工具能力、

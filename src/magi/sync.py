@@ -471,8 +471,19 @@ def build_report(cwd: Path | None = None) -> dict:
                       "magi pm backlog-sync (idempotent) && bd ready   # ensure uncompiled sources are tracked",
                       backlog=m["backlog"])
         if m["concepts"] == 0 and m["references"] == 0 and m["backlog"] == 0:
-            _hint("ingest-start",
-                  "drop sources in inbox/ and run the ingest skill to start filling this project")
+            # The same sentence whether or not anything had been dropped: five
+            # PDFs sitting in inbox/ were told to "drop sources in inbox/".
+            from .state import inbox_files
+
+            waiting = inbox_files(topic)
+            if waiting:
+                _hint("ingest-start",
+                      f"{len(waiting)} file(s) waiting in inbox/ — magi ingest auto",
+                      waiting=len(waiting))
+            else:
+                _hint("ingest-start",
+                      "drop a PDF in inbox/ (then `magi ingest auto`), or "
+                      "`magi ingest url <arXiv id or DOI> --go`")
         if m.get("claims") and m["claims_verified"] < m["claims"]:
             n_unv = m["claims"] - m["claims_verified"]
             _hint("claims-unverified",
@@ -704,7 +715,7 @@ def _close(args) -> int:
         return 1
 
     window = args.window if args.window is not None else state_mod.CLOSE_WINDOW_HOURS
-    report = state_mod.close(root, window_hours=window)
+    report = state_mod.close(root, window_hours=window, hook=bool(args.hook))
 
     if args.hook:
         print(json.dumps(state_mod.hook_payload(report, args.dialect),

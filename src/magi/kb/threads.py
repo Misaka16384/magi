@@ -95,6 +95,7 @@ PINNED = "skeleton"
 KIND_OPTIONAL = {
     vocab.PROPOSITION: (
         "depends_on",      # [[concept]] this proposition is stated in terms of
+        "premises",        # [[proposition]] it takes as given — what it rests on
         "answers",         # [[question]] it is an answer to
         "bet",             # the human's prediction, recorded before the work
         "found",           # the date the result was found, when it came before the note
@@ -107,12 +108,22 @@ KIND_OPTIONAL = {
     ),
     vocab.QUESTION: (PINNED,),
     vocab.LINE: (PINNED,),
+    vocab.RUN: (
+        "steps",           # how many steps the person authorised, in total
+        "max_parallel",    # how many of them may be open at once
+        "until",           # optional: a moment after which no new step starts
+        "knobs",           # how the mentor is asked to explore (design-auto §8)
+        "signed",          # fingerprint of the contract at the last signing
+        "report",          # drafts/runs/… once it is handed in
+        PINNED,
+    ),
 }
 
 #: Fields whose value must be a list even when it has one element. YAML makes
 #: `line: foo` and `line: [foo]` different types, and every reader downstream
 #: would otherwise have to normalise.
-LIST_FIELDS = ("line", "tags", "depends_on", "answers", "derivation", "evidence")
+LIST_FIELDS = ("line", "tags", "depends_on", "premises", "answers", "derivation",
+               "evidence")
 
 #: Statuses at which a proposition is closed and `key_move` becomes meaningful.
 _CLOSED_PROPOSITION = frozenset({"supported", "refuted", "superseded"})
@@ -519,6 +530,52 @@ def set_status(path, dst: str, text: str, host: str, line: str | None = None,
         post = format_post(text, host=host, line=line, at=at,
                            src=src if src != dst else None,
                            dst=dst if src != dst else None, via=via)
+        with open(path, "a", encoding="utf-8", newline=ending) as handle:
+            handle.write(_join_chunk(_read(path), post))
+    return post
+
+
+def transact(path, compose, host: str, line: str | None = None,
+             at: str | None = None, via: str | None = None) -> str:
+    """Decide what to write from the note *as it is under the lock*, then write it.
+
+    `append_post` takes text the caller composed beforehand, which is fine when
+    the text does not depend on the note. A run's step does: its number is the
+    count of steps already there, and whether it may be registered at all is a
+    question about the posts before it. Two callers that each read, decided and
+    then appended would both be step 7, and both be "the second of two allowed".
+
+    `compose(note)` returns `(text, fields, dst)` — the post, frontmatter fields
+    to set (or None), and a status to move to (or None). It may raise to refuse,
+    and then nothing is written. Fields, status and post land under one lock,
+    status before post, for the reason `set_status` gives.
+    """
+    from filelock import FileLock
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    lock = lock_path(path)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(lock), timeout=APPEND_TIMEOUT):
+        current = _read(path)
+        note = read_note(path)
+        text, fields, dst = compose(note)
+        kind, src = note.kind, note.status
+        if dst is not None and not vocab.is_legal_transition(kind, src, dst):
+            raise IllegalTransition(kind, src, dst, vocab.allowed_targets(kind, src))
+        edited = current
+        for key, value in (fields or {}).items():
+            edited = _replace_field(edited, key, value)
+        moved = dst is not None and dst != src
+        if moved:
+            edited = _replace_status(edited, dst)
+        ending = file_newline(path)
+        if edited != current:
+            atomic_write(path, edited, newline=ending)
+        post = format_post(text, host=host, line=line, at=at,
+                           src=src if moved else None, dst=dst if moved else None,
+                           via=via)
         with open(path, "a", encoding="utf-8", newline=ending) as handle:
             handle.write(_join_chunk(_read(path), post))
     return post

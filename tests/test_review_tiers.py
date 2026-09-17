@@ -440,13 +440,13 @@ def test_magi_waits_longer_than_the_host_it_set(ws, monkeypatch):
     gave up, says so in its own words, and may have printed something first."""
     seen = {}
 
-    def fake_run(argv, **kw):
+    def fake_run(argv, cwd, timeout, memory_mb):
         seen["argv"] = argv
-        seen["timeout"] = kw.get("timeout")
+        seen["timeout"] = timeout
         return __import__("types").SimpleNamespace(returncode=0, stdout="VERDICT: stands\nREASON: ok", stderr="")
 
     monkeypatch.setattr(review.shutil, "which", lambda *a, **k: None)
-    monkeypatch.setattr(review.subprocess, "run", fake_run)
+    monkeypatch.setattr(review, "_run_host", fake_run)
     review.ask("antigravity", "Q", cwd=ws, model="gemini-3.8-flash-high", timeout=600)
     assert "--print-timeout" in seen["argv"] and "600s" in seen["argv"]
     assert seen["timeout"] == 600 + review._CLOCK_MARGIN

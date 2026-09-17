@@ -199,7 +199,7 @@ Run `magi next` first — it reads the notes and says what to do, and never acts
 5. Before a fan-out, say what it costs: "34 pages, so about 34 sub-agent calls".
 
 ## Before you stop
-`magi sync --close` — it refuses while something happened that nobody wrote down.
+`magi sync --close` — it refuses while something happened that nobody wrote down. If `magi next` opens with RUNNING, nobody is here: carry on until `magi run status` says stop.
 {coaching_section}
 Never answer a research question from memory: retrieve, then cite `[[wikilinks]]`.
 """

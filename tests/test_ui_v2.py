@@ -619,3 +619,53 @@ def test_there_is_an_operation_that_picks_them_up(client):
 
     assert "ingest-auto" in jobs.OPS
     assert jobs.OPS["ingest-auto"]["argv"] == ["ingest", "auto"]
+
+
+# --------------------------------------------------------------------------
+# unattended runs (docs/design-auto.md): the phase the terminal prints, and
+# the two buttons
+# --------------------------------------------------------------------------
+
+def _a_signed_run(root):
+    from magi import run_cmd
+
+    assert run_cmd.main(["start", "--project-dir", str(root), "--title", "Gap",
+                         "--slug", "run-gap"]) == 0
+    assert run_cmd.main(["sign", "run-gap", "--project-dir", str(root), "--steps", "4",
+                         "--anyway"]) == 0
+    threads.set_field(root / "threads" / "p-gap.md", "depends_on", ["[[Transfer matrix]]"],
+                      host="claude")
+    assert run_cmd.main(["step", "run-gap", "--project-dir", str(root), "--do", "bound it",
+                         "--if-true", "a", "--if-false", "b"]) == 0
+    assert run_cmd.main(["result", "run-gap", "1", "--project-dir", str(root),
+                         "--text", "holds: [[p-gap]]"]) == 0
+
+
+def test_the_map_shows_a_run_the_way_the_terminal_does(client):
+    from magi.kb import runs
+
+    _a_signed_run(client.ws)
+    card = get(client, "/api/workspace/map")["run_cards"][0]
+    note = threads.read_note(client.ws / "threads" / "run-gap.md")
+    assert card["phase"] == runs.phase_line(note)
+    assert card["steps"]["used"] == 1 and card["steps"]["allowed"] == 4
+    assert [m["concept"] for m in card["methods"]] == ["Transfer matrix"]
+    assert card["methods"][0]["state"] is None
+
+
+def test_the_two_buttons_write_the_same_ledger_the_cli_reads(client):
+    from magi.core import familiar
+
+    _a_signed_run(client.ws)
+    res = client.post("/api/workspace/familiar", json={
+        "workspace": str(client.ws), "concept": "Transfer matrix", "state": "notes"})
+    assert res.status_code == 200, res.text
+    assert familiar.wants_notes("transfer-matrix")
+    card = get(client, "/api/workspace/map")["run_cards"][0]
+    assert card["methods"][0]["state"] == "notes"
+    assert [a["key"] for a in get(client, "/api/workspace/map")["actions"]
+            if a["key"] == "lecture"], "and `magi next` now offers the notes to an agent"
+
+    bad = client.post("/api/workspace/familiar", json={
+        "workspace": str(client.ws), "concept": "Transfer matrix", "state": "mastered"})
+    assert bad.status_code == 400

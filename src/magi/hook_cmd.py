@@ -217,6 +217,12 @@ def session_start(payload: dict, root=None) -> dict:
     except Exception:      # noqa: BLE001 — a hook has no business raising
         return {}
     blocks = []
+    # The phase first: whoever is starting this session is either here to talk
+    # a contract over or here to carry out one they may not edit, and they may
+    # be a different vendor's agent from the one that was here an hour ago.
+    phases = [state_mod.runs_mod.phase_line(note) for note in loaded.runs]
+    if phases:
+        blocks.append("\n".join(phases))
     if actions:
         top = actions[:3]
         said = "\n".join(f"- {action.why}\n  {action.run}" for action in top)

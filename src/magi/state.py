@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .core import md_blocks, vocab
+from .kb import chain as chain_mod
+from .kb import runs as runs_mod
 from .kb import threads
 
 #: Open propositions a line may carry before `next` starts asking for one to be
@@ -137,6 +139,13 @@ class State:
     #: debt is work somebody did without recording it, and this is work that
     #: broke a rule a person accepted.
     violations: list = field(default_factory=list)
+    #: Runs somebody walking in has to know about before anything else,
+    #: running first (docs/design-auto.md §3.2): the phase decides what kind of
+    #: session this is.
+    runs: list = field(default_factory=list)
+    #: What `candidates` held back for the person because a run is running.
+    #: They are away by construction; the items are for after the report.
+    parked: list = field(default_factory=list)
 
     @property
     def open_questions(self) -> list:
@@ -235,7 +244,8 @@ def load(root, wip_limit: int | None = None, stall_days: int = STALL_DAYS,
     state = State(root=root, notes=notes, wip_limit=max(1, limit),
                   coaching=coaching, stall_days=max(1, int(stall_days or STALL_DAYS)))
     state.lines = _lines(notes, now=now, stall_days=stall_days, limit=state.wip_limit)
-    state.queue = _queue(notes, state.lines) + _proposals(root)
+    state.runs = runs_mod.live_runs(notes)
+    state.queue = _queue(notes, state.lines, root) + _proposals(root)
     state.debt = unreadable + _debt(root, notes)
     state.violations = _violations(root, state)
     if coaching == "strict":
@@ -329,6 +339,12 @@ def _lines(notes, now, stall_days: int, limit: int) -> list:
     for note in notes:
         if note.kind == vocab.LINE:
             continue
+        if note.kind == vocab.RUN and not note.lines:
+            # A run is bookkeeping about work, not work on a line. One with no
+            # `line:` used to conjure an "(unlined)" line out of nothing, and
+            # with it a question for the person — "this project has nothing
+            # open" — about a project whose only note was the run itself.
+            continue
         for slug in (note.lines or [UNLINED]):
             members.setdefault(slug, []).append(note)
 
@@ -354,17 +370,35 @@ def _lines(notes, now, stall_days: int, limit: int) -> list:
     return views
 
 
-def _queue(notes, lines) -> list:
+def _queue(notes, lines, root=None) -> list:
     """The three interrupting events, plus the predictions a person owes."""
     items: list = []
+    by_slug = chain_mod.index(notes)
+    # A claim opened inside a run is not asked for a prediction, then or later:
+    # nobody was there to make one, and one made after the answer is not a
+    # prediction (design-v2 §4 says as much about findings). The person's bets
+    # were placed at signing, on the directions.
+    from .kb import report as report_mod
+    run_born = {slug for note in notes
+                if note.kind == vocab.RUN and note.status not in (runs_mod.DISCUSSING,
+                                                                  runs_mod.DROPPED)
+                for slug in report_mod.touched(note, by_slug)}
     for note in sorted(notes, key=lambda n: n.slug):
         line = (note.lines or [UNLINED])[0]
+        if note.kind == vocab.RUN:
+            waiting = _report_waiting(note, root)
+            if waiting:
+                items.append(QueueItem(kind="report", slug=note.slug, why=waiting,
+                                       line=(note.lines or [None])[0]))
+            if (note.kind, note.status) not in vocab.QUEUE_TRIGGERS:
+                continue
         if (note.kind, note.status) in vocab.QUEUE_TRIGGERS:
             why = (_disputed_by(note) if note.status == "disputed" else
                    "two writers set this status within minutes of each other")
             items.append(QueueItem(kind=note.status, slug=note.slug, why=why, line=line))
         elif (note.kind == vocab.PROPOSITION
               and note.status in ("conjectured", "testing")
+              and note.slug not in run_born
               and not note.frontmatter.get("bet")
               # `found:` says the result came before the note. There is no
               # prediction to ask for — it would be placed after the answer.
@@ -386,6 +420,43 @@ def _queue(notes, lines) -> list:
                 why=f"nothing posted here since {view.last_move or 'ever'}; "
                     f"still {view.status}, or dormant?"))
     return items
+
+
+def _report_waiting(note, root=None) -> str:
+    """One line for a run that has handed in and that no person has answered.
+
+    This is the whole of what an unattended run puts in front of its person
+    (design-auto §7): one item, saying what it is and what reading it will
+    cost, so they can choose the block of time. It clears on the first post a
+    person signs after the hand-in — `magi decide --about <run> --text …`.
+    """
+    if note.status != runs_mod.REPORTED:
+        return ""
+    handed = None
+    for position, post in enumerate(note.posts):
+        if (post.text or "").lstrip().startswith("REPORT "):
+            handed = position
+    if handed is None:
+        return ""
+    if any(post.host == vocab.HUMAN for post in note.posts[handed + 1:]):
+        return ""
+    lines = (note.posts[handed].text or "").strip().splitlines()
+    detail = lines[1].strip() if len(lines) > 1 else ""
+    where = str(note.frontmatter.get("report") or "")
+    # What reading costs is counted now, not when it was handed in: the person
+    # may have pressed "I know this" since, or the notes they asked for may
+    # have been written — which is the whole reason they were told the number.
+    if root is not None and where:
+        try:
+            from .kb import report as report_mod
+
+            text = (Path(root) / where).read_text(encoding="utf-8", errors="replace")
+            detail = (f"{report_mod.form_of(text)} · "
+                      f"{report_mod.cost_line(report_mod.reading_cost(root, text))}")
+        except OSError:
+            pass
+    return (f"run “{note.title}” handed in its report — {where}"
+            + (f" ({detail})" if detail else ""))
 
 
 def _disputed_by(note) -> str:
@@ -454,6 +525,15 @@ def _debt(root: Path, notes, links=None) -> list:
                 slug=note.slug, path=note.path, when=when, blocks=False,
                 why=f"{where} changed after the last post here — the argument moved "
                     f"and the proposition did not"))
+
+    by_slug = {note.slug: note for note in notes}
+    for slug, premise, when in chain_mod.fallen(notes):
+        # Not a status change: whether a claim survives losing a premise is a
+        # judgement. What is owed is that somebody looked, and said so.
+        items.append(DebtItem(
+            slug=slug, path=by_slug[slug].path, when=when,
+            why=f"its premise {premise} was refuted and nothing has been posted here "
+                "since — re-examine it, and post what is left standing"))
     return items
 
 
@@ -749,6 +829,10 @@ _QUEUE_ACTION = {
             "magi thread status <slug> <supported|refuted> --text '<why>'"),
     "phase": ("is this line still going, or is it dormant?",
               "magi thread status {slug} <active|writing|dormant> --text '<why>'"),
+    "report": ("read it when you have a block of time — nothing else from this run "
+               "needs you",
+               "magi decide --about {slug} --text '<what you made of it, and any step "
+               "that should have gone the other way>'"),
     "proposal": ("accept it, turn it down, or turn it into code",
                  "magi reflect accept {slug}  # or reject / promote"),
     "retire": ("is this rule still earning its place?",
@@ -1008,7 +1092,10 @@ def candidates(state: State, now=None) -> list:
             run=f"fix threads/{slug}.md or its derivation as the post says, then "
                 f"`magi thread status {slug} supported --text '<what changed>'`"))
 
-    for slug in unreviewed(state):
+    rests_on_it = chain_mod.dependents(chain_mod.index(state.notes))
+    # A claim other claims are being built on is read first: an error in it is
+    # the one that multiplies.
+    for slug in sorted(unreviewed(state), key=lambda s: (not rests_on_it.get(s), s)):
         note = by_slug.get(slug)
         if note is None:
             # `pending()` reads the directory; this projection may have been
@@ -1020,11 +1107,21 @@ def candidates(state: State, now=None) -> list:
             why=f"{slug} says it is solved and nobody independent has read it",
             run=f"magi review {slug}"))
 
+    actions.extend(_sources_waiting(state.root))
+    actions.extend(_notes_owed(state))
+
     patience = nudge_days(state)
     for view in state.lines:
         if view.slug in spoken_for or view.status in ("closed", "dormant"):
             continue
         owned = _open_on_line(state.notes, view.slug)
+        if any(run.status == runs_mod.RUNNING for run in state.runs):
+            # Unattended, work is pulled by what it is for. A claim that
+            # answers no question and that nothing rests on is the trivia the
+            # person keeps steering away from (design-auto §6); it is still
+            # there for them afterwards.
+            owned = [note for note in owned
+                     if not chain_mod.is_orphan(note, rests_on_it)]
         if not owned:
             continue
         oldest = min(owned, key=_waiting_since)
@@ -1050,6 +1147,149 @@ def candidates(state: State, now=None) -> list:
         actions.append(Action(
             key="work", slug=oldest.slug, line=view.slug, cost="llm", why=why,
             run=f"magi thread status {oldest.slug} <status> --text '<what happened>'"))
+    return _during_a_run(state, actions, now)
+
+
+def _during_a_run(state: State, actions: list, now) -> list:
+    """What a live run changes about the list (docs/design-auto.md §3.2, §7).
+
+    A run that is `running` comes first — above debt, which is otherwise first
+    — because what it has in flight is the one thing a cold agent cannot work
+    out from anywhere else, and because everything that needs the person is
+    *parked*: they signed the contract so as not to be asked, and nothing in
+    this list is worth more than that. A run still being discussed is the
+    opposite case and says so: nothing in it is authorised, and the next move
+    is a conversation.
+    """
+    head: list = []
+    running = [note for note in state.runs if note.status == runs_mod.RUNNING]
+    for note in running:
+        head.extend(_run_actions(note, now))
+    for note in state.runs:
+        if note.status == runs_mod.DISCUSSING:
+            # An amended run may have work in flight: it was authorised when it
+            # was registered, and closing it is the one thing still allowed.
+            for step in runs_mod.ledger(note).open:
+                head.append(Action(
+                    key="step", slug=note.slug, cost="llm",
+                    why=f"step {step.n} of run {note.slug} is still open ({step.host}, "
+                        f"{step.at}): {step.do}",
+                    run=f"finish or drop it — magi run result {note.slug} {step.n} "
+                        "--text '…'  (or --abandoned). Register nothing new: the "
+                        "contract is being changed"))
+            head.append(Action(
+                key="discuss", slug=note.slug, cost="human",
+                why=f"run {note.slug} is being discussed and is not signed — nothing "
+                    "in it is authorised yet",
+                run="skill: discuss — finish the contract with the person; they sign "
+                    f"it with `magi run sign {note.slug} --steps N`"))
+    state.parked = [action for action in actions if action.cost == "human"] if running else []
+    if running:
+        actions = [action for action in actions if action.cost != "human"]
+    return head + actions
+
+
+def _run_actions(note, now) -> list:
+    slug = note.slug
+    if not runs_mod.contract_intact(note):
+        # Not parked, though it needs the person: nothing else about this run
+        # can move until they have seen it.
+        return [Action(
+            key="contract", slug=slug, cost="human",
+            why=f"run {slug}: the contract was changed after it was signed — no step "
+                "registers until a person amends it and signs again",
+            run=f"magi run amend {slug} --text '<what changes>'   # the person's, then "
+                f"magi run sign {slug}")]
+    out: list = []
+    book = runs_mod.ledger(note)
+    for step in book.open:
+        out.append(Action(
+            key="step", slug=slug, cost="llm",
+            why=f"step {step.n} of run {slug} was registered ({step.host}, {step.at}) "
+                f"and never closed: {step.do}",
+            run=f"`magi run status {slug}` shows what it left behind; finish it, then "
+                f"magi run result {slug} {step.n} --text '…'   (or --abandoned)"))
+    why = runs_mod.spent(note, now)
+    if why:
+        out.append(Action(
+            key="report", slug=slug, cost="llm",
+            why=f"run {slug}: {why} — what is left is its report",
+            run=f"magi run step {slug} --closing --do 'write the report'; write "
+                f"drafts/runs/{slug}.md; magi run report {slug} drafts/runs/{slug}.md"))
+    elif len(book.open) < runs_mod.parallel_allowed(note):
+        left = runs_mod.steps_allowed(note) - book.used
+        out.append(Action(
+            key="mentor", slug=slug, cost="llm",
+            why=f"run {slug}: {left} step(s) left, {len(book.open)} open — you are its mentor",
+            run=f"skill: mentor — read `magi run status {slug}`, then register the next "
+                f"step with `magi run step {slug} …`"))
+    return out
+
+
+def _notes_owed(state: State) -> list:
+    """Lecture notes the person asked for and nobody has written.
+
+    They pressed "write me notes" so as to read them while a run is still going
+    — it is the one thing they do in that time — so this is offered whether or
+    not a run is running, and is an agent's job either way.
+    """
+    try:
+        from .familiar_cmd import notes_owed
+
+        owed = notes_owed(state.root, state.notes)
+    except Exception:  # noqa: BLE001 — an unreadable ledger is nobody waiting
+        return []
+    out = []
+    for row in owed:
+        where = ", ".join(row["used_in"][:3])
+        out.append(Action(
+            key="lecture", slug=row["run"], cost="llm",
+            why=f"the person asked for lecture notes on “{row['concept']}” (used in {where})",
+            run=f"skill: brief — write drafts/lectures/{row['key']}.md, anchored at where "
+                f"{where} uses it; inside a run, register it as a step first"))
+    return out
+
+
+def inbox_files(root) -> list:
+    """Names of the files sitting in `inbox/` that are sources, sorted."""
+    try:
+        from magi.core.workspace import INBOX_NON_SOURCES
+
+        return sorted(p.name for p in (Path(root) / "inbox").iterdir()
+                      if p.is_file() and p.name not in INBOX_NON_SOURCES)
+    except (OSError, ImportError):
+        return []
+
+
+def _sources_waiting(root) -> list:
+    """Sources that have arrived and that nothing has been done with.
+
+    `next` ranked notes, debts and reviews and could not see a PDF: somebody
+    new dropped a paper into `inbox/`, ran `magi next`, and was told there was
+    nothing to do — the one command that was supposed to say what comes next
+    required already knowing it (`magi ingest auto`). Both of these are
+    deterministic, which is why they say `certain`: no model is needed to run
+    a converter, only to read what it flags.
+    """
+    actions: list = []
+    waiting = inbox_files(root)
+    if waiting:
+        shown = ", ".join(waiting[:3]) + (" …" if len(waiting) > 3 else "")
+        actions.append(Action(
+            key="ingest", cost="certain",
+            why=f"{len(waiting)} file(s) waiting in inbox/: {shown}",
+            run="magi ingest auto"))
+    try:
+        from magi.ingest.ledger import pending as queued
+
+        count = len(queued(root))
+    except Exception:  # noqa: BLE001 — a missing ledger is an empty queue
+        count = 0
+    if count:
+        actions.append(Action(
+            key="ingest", cost="certain",
+            why=f"{count} link(s) queued and not fetched yet",
+            run="magi ingest batch-run"))
     return actions
 
 
@@ -1099,6 +1339,14 @@ def render(state: State, actions: list) -> str:
     trains people to stop reading it.
     """
     out: list = []
+    # The phase, before anything else. Whoever is reading — on whichever host,
+    # with no memory of the discussion — is either here to talk or here to act
+    # on a contract they may not edit, and every line below reads differently
+    # depending on which.
+    for note in state.runs:
+        out.append(runs_mod.phase_line(note))
+    if state.runs:
+        out.append("")
     if state.lines:
         out.append("Lines")
         out.extend(_line_row(view) for view in state.lines)
@@ -1151,6 +1399,11 @@ def render(state: State, actions: list) -> str:
         out.extend(action.detail)
         if not action.detail:
             out.append(f"     {action.run}")
+    if state.parked:
+        named = ", ".join(sorted({action.slug or action.key for action in state.parked}))
+        out.append("")
+        out.append(f"  Parked for the person until the run reports ({len(state.parked)}): "
+                   f"{named}. Do not ask now; work somewhere else.")
     out.extend(_scoreboard(state))
     return "\n".join(out)
 
@@ -1200,6 +1453,9 @@ def to_json(state: State, actions: list) -> dict:
                  for item in state.debt],
         "actions": [vars(action) for action in actions],
         "open_questions": [note.slug for note in state.open_questions],
+        "runs": [{"slug": note.slug, "status": note.status,
+                  "phase": runs_mod.phase_line(note)} for note in state.runs],
+        "parked": [vars(action) for action in state.parked],
     }
 
 
@@ -1726,6 +1982,11 @@ class CloseReport:
     #: events to a second place is how two records start disagreeing, and a
     #: handoff note kept beside `threads/` would be that second place.
     handoff: list = field(default_factory=list)
+    #: Why a stop hook should keep this session going: a run is running, has
+    #: work it may do, and did something since the last time it was told so.
+    #: Never part of `ok` — a live run is not unfinished bookkeeping, and
+    #: `magi sync --close` typed by hand must not fail because of one.
+    keep_going: str = ""
     map_path: str | None = None
 
     @property
@@ -1780,7 +2041,7 @@ def detect_conflicts(notes, window=CONFLICT_WINDOW) -> list:
 
 
 def close(root, window_hours: int = CLOSE_WINDOW_HOURS, write: bool = True,
-          host: str = "magi", now=None) -> CloseReport:
+          host: str = "magi", now=None, hook: bool = False) -> CloseReport:
     """The gate a session has to pass before it stops.
 
     Two things happen here and only here. Contended statuses become
@@ -1856,10 +2117,54 @@ def close(root, window_hours: int = CLOSE_WINDOW_HOURS, write: bool = True,
     report.outside = [(note.slug, why) for note in state.notes
                       for why in evidence_outside(root, note, links)]
     report.handoff = handoff_lines(root)
+    if hook:
+        report.keep_going = keep_going(root, state, now)
 
     if write:
         report.map_path = str(write_map(state))
     return report
+
+
+def keep_going(root, state: State, now=None) -> str:
+    """The sentence that keeps an unattended run from stopping, or `""`.
+
+    The budget is not enforced here — `magi run step` refuses on its own, on
+    every host. This is the convenience on hosts that have a stop hook: do not
+    end the session while the run may still act.
+
+    A stop hook that always refuses is a loop, so this one refuses only while
+    the run is *moving*: it remembers how many steps and results there were
+    the last time it spoke, and if nothing has been added since, it lets the
+    session end. An agent that stops twice in a row without registering or
+    closing anything is stuck or done, and either way is not helped by being
+    told a third time.
+    """
+    import json
+
+    for note in state.runs:
+        if note.status != runs_mod.RUNNING or not runs_mod.contract_intact(note):
+            continue
+        book = runs_mod.ledger(note)
+        marker = [len(book.steps), sum(1 for step in book.steps if not step.open)]
+        memo = Path(root) / "output" / "runs" / f"{note.slug}.stop.json"
+        try:
+            seen = json.loads(memo.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            seen = None
+        if seen == marker:
+            continue
+        try:
+            memo.parent.mkdir(parents=True, exist_ok=True)
+            memo.write_text(json.dumps(marker), encoding="utf-8")
+        except OSError:
+            pass
+        first = _run_actions(note, now)
+        nxt = f"\nNext: {first[0].why}\n  {first[0].run}" if first else ""
+        return (f"{runs_mod.phase_line(note, now)}\n"
+                "This run is unattended and may still act, so do not stop here. "
+                f"`magi run status {note.slug}` is everything you need to carry on."
+                f"{nxt}\n(Only the person ends it early: magi run stop {note.slug}.)")
+    return ""
 
 
 def block_drift(root) -> str:
@@ -1974,10 +2279,9 @@ def handoff_lines(root) -> list[str]:
     try:
         from magi.core.workspace import INBOX_NON_SOURCES
 
-        waiting = [p.name for p in (root / "inbox").iterdir()
-                   if p.is_file() and p.name not in INBOX_NON_SOURCES]
+        waiting = inbox_files(root)
         if waiting:
-            shown = ", ".join(sorted(waiting)[:3]) + (" ..." if len(waiting) > 3 else "")
+            shown = ", ".join(waiting[:3]) + (" ..." if len(waiting) > 3 else "")
             lines.append(f"{len(waiting)} file(s) waiting in inbox/: {shown}")
     except (OSError, ImportError):
         pass
@@ -2119,9 +2423,11 @@ def hook_payload(report: CloseReport, dialect: str = "claude") -> dict:
     agent to "post what happened" about a conflict asks it to clear something
     it has no way to clear, which is how a stop hook turns into a loop.
     """
-    if report.ok:
+    if report.ok and not report.keep_going:
         return {}
     parts = []
+    if report.keep_going:
+        parts.append(report.keep_going)
     if report.blocking:
         parts.append("Bookkeeping is not finished. Post what happened, or move "
                      "the status with `magi thread status`, then stop again:\n"

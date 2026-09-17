@@ -281,7 +281,7 @@ WebUI 里版本号旁边会出现一个徽章，点开有 **立即升级**。
 
 装一次 CLI，之后每开一个新项目只需要 `magi init` + `magi install`。
 
-`magi install` 做三件事，缺一件 agent 都跑不顺：把 9 个技能放到宿主找得到的地方；把当前协议写进 `AGENTS.md` 的托管块（块外你写的东西一个字不动）；给 Claude Code 装上钩子。**宿主强制力不对称**：只有 Claude Code 有文档化的钩子接口，其余宿主同一批规则只以托管块里的指令形式存在——agent 可以不听，而且有时真不听。命令会把这件事直说，而不是装成四个宿主都装好了。
+`magi install` 做三件事，缺一件 agent 都跑不顺：把 12 个技能放到宿主找得到的地方；把当前协议写进 `AGENTS.md` 的托管块（块外你写的东西一个字不动）；给 Claude Code 装上钩子。**宿主强制力不对称**：只有 Claude Code 有文档化的钩子接口，其余宿主同一批规则只以托管块里的指令形式存在——agent 可以不听，而且有时真不听。命令会把这件事直说，而不是装成四个宿主都装好了。
 
 三个钩子，只有第一个能拒绝东西：
 
@@ -319,7 +319,7 @@ magi skills uninstall            # 撤掉
 技能文件随 CLI 一起分发，**不需要 clone 仓库、不需要联网**。
 
 > [!WARN]
-> **默认只装进当前项目，不装全局。** 这 9 个技能都是围着某个研究项目转的（往 `raw/` 摄入、编译进 `wiki/`、查这个项目的图谱），装到全局意味着你打开任何一个无关项目，agent 都要背着它们。真想全机可用：`magi skills install --scope global`（命令会提醒你一次）。
+> **默认只装进当前项目，不装全局。** 这 12 个技能都是围着某个研究项目转的（往 `raw/` 摄入、编译进 `wiki/`、查这个项目的图谱），装到全局意味着你打开任何一个无关项目，agent 都要背着它们。真想全机可用：`magi skills install --scope global`（命令会提醒你一次）。
 > 装在项目里还有个好处：这些文件跟着仓库走，同事 clone 下来就有。
 
 | 宿主 | 全局位置 | 项目位置 | 怎么触发 |
@@ -370,7 +370,7 @@ claude plugin install <本地仓库目录>      # 本地开发模式
 **任何其他 agent**——项目里的 `CLAUDE.md` 和 `AGENTS.md`（两份内容完全一致）就是入场协议：它告诉 agent 进场先跑 `magi sync`、三核对应哪些命令、卡住时用 `magi guide --search` 查手册，以及「不许凭记忆回答研究问题」。只要宿主会读其中之一就能开工；实在不认，把 `magi --help` 贴给它也行。
 
 > [!EXPECT]
-> `magi skills where` 里 project 那几行显示 9/9；在**这个项目目录里**重开一个 agent 会话，输入 `/` 能看到技能（Claude Code / opencode），或者直接说「摄入 inbox 里的论文」它就动手。`magi setup --check` 的体检表也会显示当前项目各 CLI 的技能数。
+> `magi skills where` 里 project 那几行显示 12/12；在**这个项目目录里**重开一个 agent 会话，输入 `/` 能看到技能（Claude Code / opencode），或者直接说「摄入 inbox 里的论文」它就动手。`magi setup --check` 的体检表也会显示当前项目各 CLI 的技能数。
 
 > [!FIX]
 > - **装完看不到**：技能是启动时扫描的——**在项目目录里重开一个会话**（项目级技能只在从该目录启动时可见）。
@@ -744,6 +744,8 @@ magi ingest auto paper.pdf    # 或者指定一个文件
 ```powershell
 magi ingest url "https://arxiv.org/abs/2608.16520"   # 也可以是 DOI，可以一次给多个
 magi ingest url 2608.16520 --expect "fracton"   # 凭记忆敲的号：先取题名，对不上就不排
+magi ingest url 2608.16520 --go                 # 一条命令到底：取回、转换，没有任何标记就直接落进 raw/；
+                                                # 有一条要人看的，整批原样留给 magi ingest review
 magi ingest batch-run                                 # 抓取 + 转换，无人值守
 magi ingest review                                    # 看看转出来什么样
 magi ingest review --item <ID> --decision approve      # 逐条过
@@ -1522,6 +1524,50 @@ prompt 里的一句愿望；通常要隔一周跑两次才过得去——这正�
 它同时会把**5 分钟内被两个不同写者翻过的状态**标成 `conflict`（那不是状态，是分歧，只有人
 能判），并重画 `output/MAP.md`。**MAP.md 是渲染出来的**——改它不改变任何事，状态在 note 里。
 
+
+## 无人值守运行 {#run}
+
+`magi run start` 开一次运行，`magi run sign` 由你签字放行；之后 agent 用 `magi run step` 和 `magi run result` 一步一步记着账探索，`magi run status` 是任何一家 agent 接手时读的简报，`magi run report` 交上报告收尾。`magi run amend` 和 `magi run stop` 是你中途改契约、叫停的两条路。
+
+```powershell
+magi run start --title "三维 KW 对偶" --slug run-kw3d   # 讨论阶段：开一篇空契约，和 agent 把方向谈透
+magi run sign run-kw3d --steps 40                        # 你签字：契约冻结，授权 40 步（同一时刻最多 2 步，--max-parallel 可改）
+magi run status                                          # 阶段、契约、预算、做到一半的步
+magi run amend run-kw3d --text "方向 B 不做了"            # 你改主意：退回讨论阶段，改完再签
+magi run stop run-kw3d                                   # 你叫停：不再登记新步，收尾写报告
+```
+
+你给一个想法或几篇论文，和 agent 谈出几个方向，然后离开；回来时拿到**一样东西**——`drafts/runs/` 下的一篇报告。中间不打扰你：需要你拍板的事（被复核驳回的命题、待押注的猜想）在运行期间一律停放，`magi next` 只说有几件、不来问。
+
+**两个阶段，在 CLI 上分开。** 运行是 `threads/` 里一篇 `kind: run` 的 note，它的状态就是阶段，`magi next` 的第一行永远先报它：
+
+| | 讨论中 `discussing` | 运行中 `running` |
+|---|---|---|
+| 在做什么 | 谈；agent 把你说的写成契约（技能 `discuss`） | agent 照契约探索（技能 `mentor`，收尾交给 `brief`） |
+| 契约 | 随便改 | **冻结**。签字时记下了指纹，之后正文或预算动一个字，下一步就登记不上，并说出原因 |
+| `magi run step` | 拒绝——没签字的东西不进轨迹 | 接受，直到步数用完 / 并行数满 / 过了 `--until` |
+
+改一份签过的契约只有一条路，而且是你的：`magi run amend`。agent 觉得契约不对，它不能改，只能发帖说明、转去别的方向。这一条防的是最常见的漂移——把「成功」悄悄重新定义成它已经找到的东西。
+
+**状态在文件里，不在 agent 里。** 每一步先登记（做什么、为什么、成立则怎样、不成立则怎样），做完结清；两种结果都不改变下一步的，算琐碎，不该登记。预算、同一时刻的并行数、「上一个会话死的时候正在做什么」，全是对这些帖子的计数，不另存。所以一家的额度用完了，换另一家 agent CLI 进同一个目录说一句「继续」：`magi next` 第一条就是那个做到一半的步，`magi run status` 是它需要的全部。
+
+**命题之间的前提。** `depends_on:` 指向命题用到的*概念*；`premises:` 指向它当作已知的*别的命题*：`magi thread new <slug> --kind proposition … --premise <另一条命题>`，事后补用 `magi thread post <slug> --premise <另一条命题>`。由此派生三件事，都不另存：一条命题**立住了** = 它自己被强档复核判 `stands`，而且它的前提也都立住了（`supported` 只是作者自己的话）；前提后来被驳回，建在它上面的命题就欠一次重看——不替你翻状态，只要求有人看过并说一句；无人值守时，`magi next` 先让人读「别人要建在上面的那条」，既不回答任何问题、也没有东西建在上面的命题不提供。
+
+**交付：一篇报告。** `magi run outline <运行> --write` 从文件生成骨架（什么都没找到就加 `--empty`，只有一页）：契约里的动机、这次运行碰过的命题及各自是否立住、按阅读顺序排好的依赖链、每一步的「做什么 / 为什么 / 成立则 / 不成立则 / 结果」、可能值得写的失败、用到的方法。剩下的是散文，归 `brief` 技能。写完先 `magi review drafts/runs/<运行>.md`——另一个 agent 把它**整篇**读一遍，查逐命题复核看不到的东西：上下步衔接的是不是同一句话、记号是否前后一致、有没有用了没定义的词、摘要有没有把「未审」说成「成立」。然后 `magi run report` 交上去；交的那一刻检查：节齐全、没有没写的模板注释、不裸引 slug（命题的陈述必须在文中）、名词表里每一项都是概念卡、整稿被读过。`--anyway` 可以硬交，交付帖会写明哪几条没过。
+
+交上去之后，你的决策队列里只多**一项**：哪篇报告、读它要花多少（「3 个名词对你是新的，其中 2 个有讲义」）。读完说一句——`magi decide --about <运行> --text "…"`——这一项就清掉。哪一步本该走另一条：`magi run overturn <运行> <步号> --text "…"`，记在那一步上，慢环会数这种事发生了几次。
+
+**讲义和「你会什么」。** `magi familiar list` 列出运行用到的方法。两个按钮（看板的研究地图页上也有）：`magi familiar known "<概念>"`——我会，以后别给我下定义；`magi familiar notes "<概念>"`——给我写讲义，`magi next` 会把它派给 agent，写在 `drafts/lectures/` 下，锚定在这次运行实际用它的那一处。`magi familiar forget` 撤回。这份账本跟人走不跟项目走（`~/.config/magi/familiar.jsonl`）；没回答过的概念一律按「不会」处理。
+
+**模式。** `--mode deep | balanced | explore`（`run start` 或 `run sign` 时给）只是一组旋钮的名字——能否自己开新方向、先深后广还是先广后深、连续几次受挫就放弃、分叉处走一条还是两条、每条命题都审还是只审要当前提的——`--knob 名=值` 可以单独改一个。旋钮写在运行 note 里、算契约的一部分，`magi run status` 把它们渲染成 mentor 照着做的句子，所以换宿主后照样生效。**深挖的产物是一条立住的链；探索的产物是一张猜想地图**（命题停在 `conjectured`，不宣称成立）。
+
+**预算按步数，不按时长**——换宿主之间隔了几小时，挂钟白白流走，步数不会。`--steps` 没有默认值，是签字时你必须说的那个数。步数用完后还能登记至多三个 `--closing` 的步，用来写报告。
+
+有 Stop 钩子的宿主（Claude Code、Codex）上，运行还有活可干时会话不会自己停下；钩子只在运行**有进展**时才拦——连着两次停下而中间什么都没登记、没结清，就放行，不会变成死循环。其他宿主靠 `AGENTS.md` 里的一句话，尽力而为。真正的闸门在 `magi run step` 自己身上，对每个宿主都成立。
+
+无人值守之前确认一件事：你的 agent CLI 不会在没人的时候停下来弹权限确认。
+
+设计全文：仓库里的 `docs/design-auto.md`。
 
 ## 写论文 {#writing}
 

@@ -121,6 +121,31 @@ def _in_library(root: Path, value: str, what: str) -> str:
     return relative.as_posix()
 
 
+def _premise_ref(root: Path, value: str, owner: str) -> str:
+    """A `premises:` entry: another proposition, which has to exist.
+
+    Checked when it is written, like evidence, and for the same reason: a
+    premise that names nothing is a claim resting on air, and the place to
+    find that out is here rather than in the report that walks the chain.
+    """
+    from . import chain
+
+    slug = chain.slug_of(value)
+    if not slug:
+        raise Refused("--premise needs the slug of the proposition this one rests on")
+    if slug == owner:
+        raise Refused("a proposition cannot be its own premise")
+    target = root / threads.DIRNAME / f"{slug}.md"
+    try:
+        kind = threads.read_note(target).kind
+    except (FileNotFoundError, ValueError):
+        raise Refused(f"no proposition {slug} in threads/ — a premise is a claim that "
+                      "is already written down")
+    if kind != vocab.PROPOSITION:
+        raise Refused(f"{slug} is a {kind}; a premise is a proposition")
+    return f"[[{slug}]]"
+
+
 def _derivation_ref(root: Path, value: str) -> str:
     """A `derivation:` entry: a `[[wikilink]]` as written, or a checked path."""
     raw = str(value or "").strip()
@@ -135,6 +160,46 @@ def _report(args, payload: dict, human: str) -> int:
     else:
         print(human)
     return 0
+
+
+def _refuse_run(path: Path, slug: str) -> None:
+    """A run's status is its phase, and each phase change is a verb of its own.
+
+    `thread status <run> running` would be a run in the running phase that no
+    person signed and whose contract has no fingerprint — the two things
+    signing exists to produce. The generic door stays shut; `magi run` has one
+    for each move.
+    """
+    try:
+        note = threads.read_note(path)
+    except (FileNotFoundError, ValueError):
+        return
+    if note.kind == vocab.RUN:
+        raise Refused(f"{slug} is a run: its status is its phase, moved by "
+                      "`magi run sign | amend | report | stop`, not by `thread status`")
+
+
+def _refuse_ledger_post(path: Path, slug: str, text: str) -> None:
+    """A comment on a run is welcome; a line of its ledger is not.
+
+    The budget, the parallel limit and "what was in flight" are counts over the
+    STEP / RESULT posts on the run note, and each of those is written by a verb
+    that checks something first. A post typed here that *reads* as one would be
+    counted without ever having been checked.
+    """
+    from . import runs
+
+    if not runs.reads_as_ledger(text):
+        return
+    try:
+        note = threads.read_note(path)
+    except (FileNotFoundError, ValueError):
+        return
+    if note.kind == vocab.RUN:
+        word = text.strip().split(" ", 1)[0].rstrip(":")
+        raise Refused(f"a post beginning `{word}` is part of {slug}'s ledger and is "
+                      "written by `magi run step | result | sign | stop | amend | report "
+                      "| overturn`, which check it first. Say it in other words to comment")
 
 
 def cmd_new(args) -> int:
@@ -155,6 +220,8 @@ def cmd_new(args) -> int:
     for flag in ("claim", "derivation", "evidence"):
         if getattr(args, flag, None) and args.kind != vocab.PROPOSITION:
             raise Refused(f"--{flag} is for a proposition: only a claim is reviewed")
+    if getattr(args, "premise", None) and args.kind != vocab.PROPOSITION:
+        raise Refused("--premise is for a proposition: only a claim rests on other claims")
     if getattr(args, "claim", None):
         extra["claim"] = " ".join(args.claim.split())
     root = _root(args)
@@ -162,6 +229,8 @@ def cmd_new(args) -> int:
         extra["derivation"] = [_derivation_ref(root, item) for item in args.derivation]
     if getattr(args, "evidence", None):
         extra["evidence"] = [_in_library(root, item, "evidence") for item in args.evidence]
+    if getattr(args, "premise", None):
+        extra["premises"] = [_premise_ref(root, item, args.slug) for item in args.premise]
     try:
         threads.create(path, args.kind, args.title, args.purpose,
                        lines=args.line, extra=extra or None)
@@ -296,10 +365,27 @@ def cmd_post(args) -> int:
     host = host_name(args.host)
     via = via_name(host, getattr(args, "via", None))
     evidence = getattr(args, "evidence", None) or []
-    if not (args.text or "").strip() and not evidence:
+    premise = getattr(args, "premise", None) or []
+    _refuse_ledger_post(path, args.slug, args.text or "")
+    if not (args.text or "").strip() and not evidence and not premise:
         raise Refused("a post says something: --text, or --evidence <path> to add a "
                       "file a reviewer must read")
     try:
+        if premise:
+            note = threads.read_note(path)
+            if note.kind != vocab.PROPOSITION:
+                raise Refused(f"--premise is for a proposition; {args.slug} is a {note.kind}")
+            root = _root(args)
+            merged = list(dict.fromkeys(
+                [str(item) for item in threads.as_list(note.frontmatter.get("premises"))]
+                + [_premise_ref(root, item, args.slug) for item in premise]))
+            threads.set_field(path, "premises", merged, host=host,
+                              text=args.text or "", line=args.line, via=via)
+            if not evidence:
+                return _report(args, {"slug": args.slug, "path": str(path),
+                                      "premises": merged},
+                               f"posted to {args.slug} ({len(premise)} premise(s) recorded)")
+            args.text = ""
         if evidence:
             # The list grows; it never shrinks from here. Recorded as a field
             # change so the post says what was added and by whom, the way a
@@ -419,6 +505,7 @@ def _warn_if_closing_a_line(args, path) -> None:
 
 def cmd_status(args) -> int:
     path = _path(args, args.slug)
+    _refuse_run(path, args.slug)
 
     # Closing a line through this command is allowed and lands as debt for
     # `sync --close` to report — that is the decided shape, and refusing here
@@ -466,7 +553,11 @@ def build_parser() -> argparse.ArgumentParser:
     new = sub.add_parser("new", parents=[common],
                          help="Open a proposition, question or line")
     new.add_argument("slug", help="Stable id; becomes the filename and never changes")
-    new.add_argument("--kind", required=True, choices=list(vocab.KINDS))
+    # Not `vocab.KINDS`: a run is opened by `magi run start`, which writes its
+    # contract, and moved by `magi run sign`. Listing it here would have made
+    # "a run nobody signed, already running" one generic command away.
+    new.add_argument("--kind", required=True,
+                     choices=[kind for kind in vocab.KINDS if kind != vocab.RUN])
     new.add_argument("--title", required=True, help="The claim or question, in one line")
     new.add_argument("--purpose", required=True,
                      help="Why this is worth opening — one line, for whoever reads it later")
@@ -484,6 +575,9 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("--derivation", action="append", default=[], metavar="PATH",
                      help="Where the argument lives: a [[drafts/...]] link or a path in "
                           "the project (repeatable)")
+    new.add_argument("--premise", action="append", default=[], metavar="SLUG",
+                     help="A proposition this one takes as given (repeatable). It stands "
+                          "only if they do")
     new.add_argument("--evidence", action="append", default=[], metavar="PATH",
                      help="A file in the project a reviewer must read or run: a script, "
                           "data, a notebook (repeatable). Must exist, must be inside "
@@ -546,6 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Add a signed post to the discussion")
     post.add_argument("slug")
     post.add_argument("--text", help="What happened (required unless --evidence)")
+    post.add_argument("--premise", action="append", default=[], metavar="SLUG",
+                      help="Record that this proposition rests on another (repeatable)")
     post.add_argument("--evidence", action="append", default=[], metavar="PATH",
                       help="Add a file in the project a reviewer must read or run "
                            "(repeatable); recorded as a field change on the note")

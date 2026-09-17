@@ -58,6 +58,19 @@
       queue_title: "等你拍板的决定",
       queue_subtitle: "需要你拍板的事项",
       queue_none: "暂无待决定事项。",
+      runs_title: "无人值守运行",
+      runs_subtitle: "阶段、预算，以及这次运行用到的方法",
+      runs_steps: "第 {used}/{allowed} 步 · {open} 步未结清",
+      runs_methods: "用到的方法——告诉它你会不会：",
+      runs_no_methods: "还没有命题记下它用到的概念（depends_on）。",
+      runs_report: "报告",
+      familiar_known: "我会",
+      familiar_notes: "给我写讲义",
+      familiar_forget: "撤回",
+      familiar_state_known: "已标记：会",
+      familiar_state_notes: "已要讲义",
+      familiar_notes_ready: "讲义已写好",
+      familiar_saved: "记下了。",
       proposal_accept: "采纳",
       proposal_reject: "否掉",
       proposal_promote: "变成代码",
@@ -168,6 +181,7 @@
       cfg_f_hosts: "内建之外，本项目可用的 agent CLI：二进制名、skill 位置、无头调用方式。",
       cfg_f_review_model: "复核用哪个模型。留空 = 那个宿主的便宜档。",
       cfg_f_review_effort: "推理档位。留空使用宿主默认；模型 id 通常已包含档位。",
+      cfg_f_review_memory_mb: "复核方及其起的所有进程合计内存上限（MB）。Windows 上强制执行；0 为不设上限。",
       cfg_model_cheap: "便宜档（{id}）",
       cfg_model_default: "宿主默认",
       cfg_model_pin_host: "先指定 review_host 再选模型；模型名因厂商而异",
@@ -929,6 +943,19 @@
       queue_title: "Decisions waiting on you",
       queue_subtitle: "Items waiting on your decision",
       queue_none: "Nothing is waiting on you.",
+      runs_title: "Unattended runs",
+      runs_subtitle: "The phase, the budget, and the methods a run used",
+      runs_steps: "step {used}/{allowed} · {open} open",
+      runs_methods: "Methods it used — say whether you know them:",
+      runs_no_methods: "No claim has recorded a concept it uses (depends_on) yet.",
+      runs_report: "report",
+      familiar_known: "I know this",
+      familiar_notes: "Write me notes",
+      familiar_forget: "Undo",
+      familiar_state_known: "marked known",
+      familiar_state_notes: "notes asked for",
+      familiar_notes_ready: "notes are written",
+      familiar_saved: "Noted.",
       proposal_accept: "Accept",
       proposal_reject: "Turn down",
       proposal_promote: "Make it code",
@@ -1039,6 +1066,7 @@
       cfg_f_hosts: "Agent CLIs available beyond the built-in ones: binary, skill location, headless invocation.",
       cfg_f_review_model: "Which model reviews. Empty means that host's cheap tier.",
       cfg_f_review_effort: "Reasoning effort. Empty uses the host default; the model id often carries it.",
+      cfg_f_review_memory_mb: "Memory ceiling (MB) for the reviewer and everything it starts. Enforced on Windows; 0 means none.",
       cfg_model_cheap: "the cheap tier ({id})",
       cfg_model_default: "host default",
       cfg_model_pin_host: "Set review_host first; model names differ by vendor",
@@ -3499,6 +3527,7 @@
       unfiled.classList.toggle("badge-terracotta", n > 0);
     }
 
+    renderRuns(data.run_cards || []);
     renderQueue(queue, data);
     renderLines(lines, data);
     renderLookingBack(back, data.retrospective || {});
@@ -3567,6 +3596,70 @@
     box.querySelectorAll(".proposal-btn").forEach((btn) => {
       btn.addEventListener("click", () => decideProposal(btn.dataset.id,
                                                          btn.dataset.verb));
+    });
+  }
+
+  // Runs, as the CLI describes them. The phase line is `magi next`'s first
+  // line verbatim; the two buttons are `magi familiar known|notes`. Nothing
+  // here decides what phase a run is in or what counts as known.
+  function renderRuns(runs) {
+    const card = document.getElementById("runs-card");
+    const box = document.getElementById("runs-list");
+    if (!card || !box) return;
+    card.style.display = runs.length ? "" : "none";
+    box.innerHTML = "";
+    runs.forEach((run) => {
+      const row = document.createElement("div");
+      row.className = "stack-row";
+      const steps = run.steps || {};
+      const counts = run.status === "discussing" ? "" :
+        `<span class="badge">${escapeHtml(t("runs_steps", {
+          used: steps.used || 0, allowed: steps.allowed || 0,
+          open: (steps.open || []).length }))}</span> `;
+      const report = run.report
+        ? ` · <code>${escapeHtml(t("runs_report"))}: ${escapeHtml(run.report)}</code>` : "";
+      const methods = (run.methods || []).map((m) => {
+        const said = m.state === "known" ? t("familiar_state_known")
+          : m.state === "notes" ? t("familiar_state_notes") : "";
+        const ready = m.notes_ready ? ` · ${escapeHtml(t("familiar_notes_ready"))}` : "";
+        const buttons = m.state
+          ? `<button class="btn btn-secondary btn-sm familiar-btn" data-concept="${escapeHtml(m.concept)}" data-state="">${escapeHtml(t("familiar_forget"))}</button>`
+          : `<button class="btn btn-secondary btn-sm familiar-btn" data-concept="${escapeHtml(m.concept)}" data-state="known">${escapeHtml(t("familiar_known"))}</button>`
+            + `<button class="btn btn-secondary btn-sm familiar-btn" data-concept="${escapeHtml(m.concept)}" data-state="notes">${escapeHtml(t("familiar_notes"))}</button>`;
+        return `<div class="form-row"><span>${escapeHtml(m.concept)}`
+          + (said ? ` <span class="badge">${escapeHtml(said)}${ready}</span>` : ready)
+          + `</span>${buttons}</div>`;
+      }).join("");
+      const methodsBlock = run.status === "discussing" ? ""
+        : `<p class="card-subtitle">${escapeHtml(methods ? t("runs_methods") : t("runs_no_methods"))}</p>${methods}`;
+      row.innerHTML =
+        `<div><span class="badge badge-terracotta">${escapeHtml(run.status)}</span> ${counts}`
+        + `<a href="#" class="thread-link" data-slug="${escapeHtml(run.slug)}">${escapeHtml(run.title)}</a>${report}`
+        + `<p class="card-subtitle">${escapeHtml(run.phase)}</p>${methodsBlock}</div>`;
+      box.appendChild(row);
+    });
+    box.querySelectorAll(".thread-link").forEach((a) => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchTab("melchior");
+        openThread(a.dataset.slug);
+      });
+    });
+    box.querySelectorAll(".familiar-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await apiFetch("/api/workspace/familiar", {
+            method: "POST",
+            body: JSON.stringify({ workspace: state.workspace,
+                                   concept: btn.dataset.concept,
+                                   state: btn.dataset.state || null }),
+          });
+          showToast(t("familiar_saved"), "success");
+          loadMap();
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      });
     });
   }
 
@@ -5765,6 +5858,7 @@
     "research.review_host": "cfg_f_review_host",
     "research.review_model": "cfg_f_review_model",
     "research.review_effort": "cfg_f_review_effort",
+    "research.review_memory_mb": "cfg_f_review_memory_mb",
   };
 
   // `only` picks which keys a card shows: the Dashboard keeps the general

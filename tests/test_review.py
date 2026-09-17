@@ -772,7 +772,7 @@ def test_ask_itself_refuses_before_it_spawns_anything(monkeypatch):
     def _never(*a, **k):
         raise AssertionError("a truncated prompt was handed to the host")
 
-    monkeypatch.setattr(review.subprocess, "run", _never)
+    monkeypatch.setattr(review, "_run_host", _never)
 
     with pytest.raises(RuntimeError) as caught:
         review.ask("claude", "line one\nline two", cwd=".")

@@ -16,9 +16,9 @@ citation the human read out.
 1. Files already in `inbox/`, or a path you were given: `magi ingest auto` —
    it routes by type and finalizes. Stop here unless it refuses. (A run that
    skipped cleanup: `magi ingest finalize <the file> --project-dir .`.)
-2. A link, DOI, arXiv id or citation: identify it first — that is the step
-   that needs you, not the pipeline. An id you typed from memory goes in as
-   `magi ingest url "<id>" --expect "<title fragment>"`; then `magi ingest batch-run`.
+2. A link, DOI, arXiv id or citation: identify it first — that step needs you,
+   not the pipeline. `magi ingest url "<id>" --expect "<title fragment>" --go`
+   fetches it and lands what came through unflagged; anything flagged → step 3.
 3. `magi ingest review` lists what is waiting. Show its findings to the human
    before committing — surface `identity-mismatch`, `figure-count-mismatch`
    and `image-path-not-portable` every time: the file is not what its name says.

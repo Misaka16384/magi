@@ -49,6 +49,10 @@ research:
   # high),钉了别的模型就用那家 CLI 自己的默认——模型 id 往往已经带了档位
   # (agy 的 gemini-3.8-flash-high 就是),再传一次只会多一个出错的机会。
   review_effort:
+  # 复核方和它起的所有进程合起来最多占多少 MB 内存。复核方会自己写脚本自己跑,
+  # 2026-09-17 有一次脚本死循环涨到 18.9 GB 把桌面拖垮。Windows 上用 Job Object
+  # 强制执行,其他平台暂不强制;0 = 不设上限。
+  review_memory_mb: 4096
   # (weekly_calls 已取消,2026-09-03。大家都在 token plan 上,按次数封顶的
   # 预算拦住的只有它本该保护的复核;账本 output/llm-ledger.jsonl 照记,只是
   # 不再拒绝。写在这里的 weekly_calls 不会被读。)
